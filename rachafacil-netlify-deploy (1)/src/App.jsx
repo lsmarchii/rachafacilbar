@@ -7,6 +7,12 @@ import {
 } from 'lucide-react';
 
 // ==========================================
+// IMPORTAÇÕES DO FIREBASE (BANCO EM TEMPO REAL)
+// ==========================================
+import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { db } from "./firebase";
+
+// ==========================================
 // GERADOR OFICIAL DE PIX (BR CODE BACEN CRC16)
 // ==========================================
 function crc16ccitt(str) {
@@ -135,43 +141,38 @@ const getInitials = (name) => {
 };
 
 export default function App() {
-  // ==========================================
-  // ESTADOS GERAIS E LOBBY ZERADO (PRODUÇÃO)
-  // ==========================================
-  const [roomCode, setRoomCode] = useState('');
-  const [inRoom, setInRoom] = useState(false);
-  const [lobbyMode, setLobbyMode] = useState('create'); // 'create' | 'join'
+  // PERSISTÊNCIA: Recupera da memória do navegador ao atualizar (F5)
+  const [roomCode, setRoomCode] = useState(() => localStorage.getItem('rachafacil_roomCode') || '');
+  const [inRoom, setInRoom] = useState(() => localStorage.getItem('rachafacil_inRoom') === 'true');
+  const [activeUserId, setActiveUserId] = useState(() => localStorage.getItem('rachafacil_activeUserId') || null);
+
+  const [lobbyMode, setLobbyMode] = useState('create');
   const [userNameInput, setUserNameInput] = useState('');
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [roomTitleInput, setRoomTitleInput] = useState('');
   const [hostPinInput, setHostPinInput] = useState('');
 
-  // Dados sincronizados da sala
   const [roomData, setRoomData] = useState(null);
-  const [activeUserId, setActiveUserId] = useState(null);
-  const [activeTab, setActiveTab] = useState('items'); // 'items' | 'pix' | 'security'
+  const [activeTab, setActiveTab] = useState('items');
 
-  // Formulários internos da sala
   const [newParticipantName, setNewParticipantName] = useState('');
   const [itemName, setItemName] = useState('');
   const [itemPrice, setItemPrice] = useState('');
   const [itemQty, setItemQty] = useState(1);
   const [selectedConsumers, setSelectedConsumers] = useState([]);
 
-  // Modais e estados de UI
   const [expandedPersonId, setExpandedPersonId] = useState(null);
   const [pixModalPerson, setPixModalPerson] = useState(null);
   const [requestDeleteModalItem, setRequestDeleteModalItem] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
   const [showAdSlots, setShowAdSlots] = useState(true);
-  const [legalModal, setLegalModal] = useState(null); // 'privacy' | 'terms'
+  const [legalModal, setLegalModal] = useState(null);
 
   const showToast = (msg) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3200);
   };
 
-  // Verifica se há ?sala=XXXX na URL ao abrir o site
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const salaParam = params.get('sala');
@@ -181,34 +182,46 @@ export default function App() {
     }
   }, []);
 
-  // Sincronização em tempo real entre abas / localStorage
+  // SINCRONIZAÇÃO EM TEMPO REAL COM O FIREBASE
   useEffect(() => {
     if (!inRoom || !roomCode) return;
-    const channel = new BroadcastChannel(`rachafacil_channel_${roomCode}`);
-    channel.onmessage = (event) => {
-      if (event.data && event.data.type === 'SYNC_ROOM') {
-        setRoomData(event.data.payload);
+    
+    const roomRef = doc(db, "rooms", roomCode);
+    const unsubscribe = onSnapshot(roomRef, (docSnap) => {
+      if (docSnap.exists()) {
+        setRoomData(docSnap.data());
+      } else {
+        // Se a sala foi apagada na nuvem
+        handleExitRoom();
+        showToast("Esta sala foi encerrada pelo anfitrião.");
       }
-    };
-    return () => channel.close();
+    });
+
+    return () => unsubscribe();
   }, [inRoom, roomCode]);
 
-  const saveAndBroadcastRoom = (updatedRoom) => {
+  const saveAndBroadcastRoom = async (updatedRoom) => {
     setRoomData(updatedRoom);
-    localStorage.setItem(`rachafacil_room_${updatedRoom.code}`, JSON.stringify(updatedRoom));
     try {
-      const channel = new BroadcastChannel(`rachafacil_channel_${updatedRoom.code}`);
-      channel.postMessage({ type: 'SYNC_ROOM', payload: updatedRoom });
-      channel.close();
+      const roomRef = doc(db, "rooms", updatedRoom.code);
+      await setDoc(roomRef, updatedRoom, { merge: true });
     } catch (e) {
-      // Fallback silencioso
+      console.error("Erro ao salvar no Firebase:", e);
+      showToast('Erro de sincronização com o banco de dados.');
     }
   };
 
-  // ==========================================
-  // AÇÕES DO LOBBY (CRIAR SALA ZERADA OU ENTRAR)
-  // ==========================================
-  const handleCreateZeroRoom = (e) => {
+  const handleExitRoom = () => {
+    localStorage.removeItem('rachafacil_roomCode');
+    localStorage.removeItem('rachafacil_inRoom');
+    localStorage.removeItem('rachafacil_activeUserId');
+    setInRoom(false);
+    setRoomCode('');
+    setActiveUserId(null);
+    setRoomData(null);
+  };
+
+  const handleCreateZeroRoom = async (e) => {
     e.preventDefault();
     const cleanName = userNameInput.trim();
     if (!cleanName) {
@@ -238,13 +251,19 @@ export default function App() {
           name: cleanName,
           isHost: true,
           gradient: AVATAR_GRADIENTS[0],
-          paymentStatus: 'pending' // 'pending' | 'notified' | 'paid_pix' | 'paid_card'
+          paymentStatus: 'pending'
         }
       ],
       items: []
     };
 
-    saveAndBroadcastRoom(newRoom);
+    await saveAndBroadcastRoom(newRoom);
+    
+    // Salva na persistência local
+    localStorage.setItem('rachafacil_roomCode', generatedCode);
+    localStorage.setItem('rachafacil_inRoom', 'true');
+    localStorage.setItem('rachafacil_activeUserId', hostId);
+
     setRoomCode(generatedCode);
     setActiveUserId(hostId);
     setSelectedConsumers([hostId]);
@@ -252,7 +271,7 @@ export default function App() {
     showToast(`Sala #${generatedCode} criada! Você é o Anfitrião 👑`);
   };
 
-  const handleJoinRoom = (e) => {
+  const handleJoinRoom = async (e) => {
     e.preventDefault();
     const cleanName = userNameInput.trim();
     const cleanCode = joinCodeInput.trim().toUpperCase().replace('#', '');
@@ -261,80 +280,57 @@ export default function App() {
       return;
     }
 
-    const stored = localStorage.getItem(`rachafacil_room_${cleanCode}`);
-    if (stored) {
-      const parsedRoom = JSON.parse(stored);
-      const existingPerson = parsedRoom.participants.find(
-        (p) => p.name.toLowerCase() === cleanName.toLowerCase()
-      );
+    try {
+      const roomRef = doc(db, "rooms", cleanCode);
+      const docSnap = await getDoc(roomRef);
 
-      if (existingPerson) {
-        setRoomData(parsedRoom);
-        setRoomCode(cleanCode);
-        setActiveUserId(existingPerson.id);
-        setSelectedConsumers([existingPerson.id]);
-        setInRoom(true);
-        showToast(`Bem-vindo de volta, ${existingPerson.name}!`);
-      } else {
-        const newUserId = 'user_' + Date.now();
-        const newParticipant = {
-          id: newUserId,
-          name: cleanName,
-          isHost: false,
-          gradient: AVATAR_GRADIENTS[parsedRoom.participants.length % AVATAR_GRADIENTS.length],
-          paymentStatus: 'pending'
-        };
-        const updatedRoom = {
-          ...parsedRoom,
-          participants: [...parsedRoom.participants, newParticipant],
-          couvertPayers: [...(parsedRoom.couvertPayers || []), newUserId]
-        };
-        saveAndBroadcastRoom(updatedRoom);
-        setRoomCode(cleanCode);
-        setActiveUserId(newUserId);
-        setSelectedConsumers([newUserId]);
-        setInRoom(true);
-        showToast(`Você entrou na sala #${cleanCode}!`);
-      }
-    } else {
-      // Se o amigo abriu o link em outro aparelho sem Firebase configurado ainda, inicia a sala sincronizada com o código informado
-      const guestId = 'user_' + Date.now();
-      const newRoomFromCode = {
-        code: cleanCode,
-        title: `Sala #${cleanCode}`,
-        hostId: guestId,
-        hostPin: '',
-        isLocked: false,
-        serviceFeeEnabled: true,
-        couvertPerPerson: 0,
-        couvertPayers: [guestId],
-        discountAmount: 0,
-        pixKeyType: 'Celular',
-        pixKey: '',
-        pixHolder: cleanName,
-        participants: [
-          {
-            id: guestId,
+      if (docSnap.exists()) {
+        const parsedRoom = docSnap.data();
+        const existingPerson = parsedRoom.participants.find(
+          (p) => p.name.toLowerCase() === cleanName.toLowerCase()
+        );
+
+        let activeId = '';
+        if (existingPerson) {
+          activeId = existingPerson.id;
+          setRoomData(parsedRoom);
+        } else {
+          const newUserId = 'user_' + Date.now();
+          activeId = newUserId;
+          const newParticipant = {
+            id: newUserId,
             name: cleanName,
-            isHost: true,
-            gradient: AVATAR_GRADIENTS[0],
+            isHost: false,
+            gradient: AVATAR_GRADIENTS[parsedRoom.participants.length % AVATAR_GRADIENTS.length],
             paymentStatus: 'pending'
-          }
-        ],
-        items: []
-      };
-      saveAndBroadcastRoom(newRoomFromCode);
-      setRoomCode(cleanCode);
-      setActiveUserId(guestId);
-      setSelectedConsumers([guestId]);
-      setInRoom(true);
-      showToast(`Sala #${cleanCode} aberta!`);
+          };
+          const updatedRoom = {
+            ...parsedRoom,
+            participants: [...parsedRoom.participants, newParticipant],
+            couvertPayers: [...(parsedRoom.couvertPayers || []), newUserId]
+          };
+          await saveAndBroadcastRoom(updatedRoom);
+        }
+
+        localStorage.setItem('rachafacil_roomCode', cleanCode);
+        localStorage.setItem('rachafacil_inRoom', 'true');
+        localStorage.setItem('rachafacil_activeUserId', activeId);
+
+        setRoomCode(cleanCode);
+        setActiveUserId(activeId);
+        setSelectedConsumers([activeId]);
+        setInRoom(true);
+        showToast(`Bem-vindo à mesa #${cleanCode}!`);
+      } else {
+        // Sala não existe na nuvem - BLOQUEIA criação fantasma
+        showToast("Sala não encontrada! Verifique se o código está correto.");
+      }
+    } catch (err) {
+      console.error("Erro ao entrar na sala:", err);
+      showToast("Erro ao conectar com o banco de dados.");
     }
   };
 
-  // ==========================================
-  // PERMISSÕES E CÁLCULOS EM TEMPO REAL
-  // ==========================================
   const currentUser = useMemo(() => {
     if (!roomData) return null;
     return roomData.participants.find((p) => p.id === activeUserId) || roomData.participants[0];
@@ -404,10 +400,7 @@ export default function App() {
     return { byPerson, tableSubtotal, totalService, totalCouvert, totalDiscount: discountAmount, grandTotal };
   }, [roomData]);
 
-  // ==========================================
-  // FUNÇÕES DE INTERAÇÃO NA SALA
-  // ==========================================
-  const handleAddParticipant = (e) => {
+  const handleAddParticipant = async (e) => {
     e.preventDefault();
     if (roomData.isLocked && !isCurrentUserHost) {
       showToast('A mesa está trancada pelo Anfitrião!');
@@ -428,12 +421,12 @@ export default function App() {
       participants: [...roomData.participants, newPerson],
       couvertPayers: [...(roomData.couvertPayers || []), newId]
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     setNewParticipantName('');
     showToast(`${clean} entrou na mesa!`);
   };
 
-  const handleRemoveParticipant = (personId) => {
+  const handleRemoveParticipant = async (personId) => {
     if (!isCurrentUserHost) {
       showToast('Somente o Anfitrião pode remover participantes.');
       return;
@@ -450,12 +443,12 @@ export default function App() {
         consumers: it.consumers.filter((cid) => cid !== personId)
       }))
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     if (activeUserId === personId) setActiveUserId(roomData.hostId);
     showToast('Participante removido.');
   };
 
-  const handleAddItem = (e) => {
+  const handleAddItem = async (e) => {
     e.preventDefault();
     if (roomData.isLocked && !isCurrentUserHost) {
       showToast('Mesa trancada para novos lançamentos!');
@@ -482,7 +475,7 @@ export default function App() {
       ...roomData,
       items: [newItem, ...roomData.items]
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     setItemName('');
     setItemPrice('');
     setItemQty(1);
@@ -490,7 +483,7 @@ export default function App() {
     showToast(`"${cleanName}" adicionado na conta!`);
   };
 
-  const handleToggleItemConsumer = (itemId, personId) => {
+  const handleToggleItemConsumer = async (itemId, personId) => {
     if (roomData.isLocked && !isCurrentUserHost) {
       showToast('A mesa está trancada pelo Anfitrião!');
       return;
@@ -506,11 +499,10 @@ export default function App() {
         return { ...it, consumers: nextConsumers };
       })
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
   };
 
-  // Exclusão direta pelo Anfitrião
-  const handleHostDeleteItem = (itemId) => {
+  const handleHostDeleteItem = async (itemId) => {
     if (!isCurrentUserHost) {
       showToast('Apenas o Anfitrião pode excluir itens diretamente.');
       return;
@@ -519,12 +511,11 @@ export default function App() {
       ...roomData,
       items: roomData.items.filter((it) => it.id !== itemId)
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     showToast('Item excluído pelo Anfitrião!');
   };
 
-  // Pedido de exclusão por Convidado
-  const handleGuestRequestDelete = (itemId, reason) => {
+  const handleGuestRequestDelete = async (itemId, reason) => {
     const updated = {
       ...roomData,
       items: roomData.items.map((it) =>
@@ -539,36 +530,34 @@ export default function App() {
           : it
       )
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     setRequestDeleteModalItem(null);
     showToast('Solicitação enviada para o Anfitrião aprovar!');
   };
 
-  const handleHostDismissRequest = (itemId) => {
+  const handleHostDismissRequest = async (itemId) => {
     const updated = {
       ...roomData,
       items: roomData.items.map((it) => (it.id === itemId ? { ...it, deleteRequest: null } : it))
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     showToast('Solicitação recusada. O item foi mantido.');
   };
 
-  const handleSetPaymentStatus = (personId, newStatus) => {
+  const handleSetPaymentStatus = async (personId, newStatus) => {
     const updated = {
       ...roomData,
       participants: roomData.participants.map((p) =>
         p.id === personId ? { ...p, paymentStatus: newStatus } : p
       )
     };
-    saveAndBroadcastRoom(updated);
+    await saveAndBroadcastRoom(updated);
     showToast('Status de pagamento atualizado!');
   };
 
   const handleCopyInviteLink = () => {
     const inviteUrl = `${window.location.origin}${window.location.pathname}?sala=${roomData.code}`;
-    const text = `🍻 Entre na nossa mesa no *RachaFácil*!
-Código da Sala: *#${roomData.code}*
-Acesse direto: ${inviteUrl}`;
+    const text = `🍻 Entre na nossa mesa no *RachaFácil*!\nCódigo da Sala: *#${roomData.code}*\nAcesse direto: ${inviteUrl}`;
     navigator.clipboard.writeText(text);
     showToast('Link de convite copiado para o WhatsApp!');
   };
@@ -592,20 +581,15 @@ Acesse direto: ${inviteUrl}`;
     lines.push(`──────────────────────`);
     lines.push(`💰 *TOTAL DA MESA:* ${formatCurrency(totals.grandTotal)}`);
     if (roomData.pixKey) {
-      lines.push(`
-💸 *Faça seu Pix para:* ${roomData.pixKey} (${roomData.pixHolder || 'Anfitrião'})`);
+      lines.push(`\n💸 *Faça seu Pix para:* ${roomData.pixKey} (${roomData.pixHolder || 'Anfitrião'})`);
     }
     const shareUrl = `${window.location.origin}${window.location.pathname}`;
-    lines.push(`
-⚡ _Conta dividida em 10s no RachaFácil:_ ${shareUrl}`);
+    lines.push(`\n⚡ _Conta dividida em 10s no RachaFácil:_ ${shareUrl}`);
 
     navigator.clipboard.writeText(lines.join('\n'));
     showToast('Resumo completo copiado para o WhatsApp! 🎉');
   };
 
-  // ==========================================
-  // TELA 1: LOBBY ZERADO DE PRODUÇÃO
-  // ==========================================
   if (!inRoom || !roomData) {
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col justify-between p-4 pb-10">
@@ -617,7 +601,6 @@ Acesse direto: ${inviteUrl}`;
         )}
 
         <div className="max-w-md w-full mx-auto pt-6 space-y-6">
-          {/* Branding Header */}
           <div className="text-center space-y-2">
             <div className="inline-flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-3.5 py-1.5 rounded-full text-xs font-semibold">
               <Sparkles className="w-3.5 h-3.5" /> Divisão de Conta em Tempo Real + QR Pix
@@ -630,7 +613,6 @@ Acesse direto: ${inviteUrl}`;
             </p>
           </div>
 
-          {/* Seletor Criar vs Entrar */}
           <div className="grid grid-cols-2 bg-slate-800 p-1.5 rounded-2xl border border-slate-700/60">
             <button
               type="button"
@@ -656,7 +638,6 @@ Acesse direto: ${inviteUrl}`;
             </button>
           </div>
 
-          {/* Card do Formulário */}
           {lobbyMode === 'create' ? (
             <form
               onSubmit={handleCreateZeroRoom}
@@ -755,19 +736,15 @@ Acesse direto: ${inviteUrl}`;
             </form>
           )}
 
-          {/* Bloco SEO & AdSense Content */}
           <div className="bg-slate-800/60 rounded-2xl p-5 border border-slate-700/40 space-y-3 text-xs text-slate-400">
             <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
               <HelpCircle className="w-4 h-4 text-emerald-400" /> Como funciona o RachaFácil?
             </h2>
             <p>
-              1. <strong>Crie a Sala:</strong> O responsável pela mesa cria uma sala gratuita e compartilha o link ou código de 4 dígitos com os amigos.
+              1. <strong>Crie a Sala:</strong> O responsável pela mesa cria uma sala e compartilha o código com os amigos.
             </p>
             <p>
-              2. <strong>Lance em Tempo Real:</strong> Todos da mesa podem adicionar porções, bebidas e marcar quem dividiu cada item. Somente o Anfitrião pode excluir itens para evitar erros.
-            </p>
-            <p>
-              3. <strong>Feche com Pix Oficial:</strong> O app calcula automaticamente os 10% do garçom de forma proporcional ao consumo de cada pessoa e gera o QR Code Pix oficial do Banco Central.
+              2. <strong>Tempo Real:</strong> Todos da mesa podem adicionar porções e bebidas. O Firestore sincroniza os celulares instantaneamente.
             </p>
             <div className="pt-2 flex items-center justify-between border-t border-slate-700/50 text-[11px]">
               <button onClick={() => setLegalModal('privacy')} className="hover:text-emerald-400 underline">
@@ -780,7 +757,6 @@ Acesse direto: ${inviteUrl}`;
           </div>
         </div>
 
-        {/* Modal Legal LGPD / Termos */}
         {legalModal && (
           <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
             <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-5 space-y-4">
@@ -789,8 +765,8 @@ Acesse direto: ${inviteUrl}`;
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
                 {legalModal === 'privacy'
-                  ? 'O RachaFácil preza pela sua privacidade conforme a Lei Geral de Proteção de Dados (Lei nº 13.709/2018). Não exigimos cadastro de senha ou dados bancários sensíveis. As chaves Pix informadas servem exclusivamente para gerar o código padrão EMV do Banco Central diretamente no navegador do usuário e podem ser apagadas a qualquer instante pelo criador da sala.'
-                  : 'O RachaFácil é uma ferramenta auxiliar de cálculo para divisão de despesas entre amigos. Os valores e pagamentos via Pix ocorrem diretamente entre as instituições bancárias dos usuários, sem intermediação financeira ou retenção de valores pela plataforma.'}
+                  ? 'O RachaFácil preza pela sua privacidade conforme a LGPD. As chaves Pix servem exclusivamente para gerar o Pix oficial.'
+                  : 'O RachaFácil é uma ferramenta auxiliar de cálculo para divisão de despesas entre amigos.'}
               </p>
               <button
                 onClick={() => setLegalModal(null)}
@@ -805,12 +781,8 @@ Acesse direto: ${inviteUrl}`;
     );
   }
 
-  // ==========================================
-  // TELA 2: DENTRO DA SALA ATIVA
-  // ==========================================
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 pb-28">
-      {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-emerald-500 text-slate-950 font-bold px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-2">
           <CheckCircle2 className="w-5 h-5 shrink-0" />
@@ -818,7 +790,6 @@ Acesse direto: ${inviteUrl}`;
         </div>
       )}
 
-      {/* Header Fixo */}
       <header className="sticky top-0 z-30 bg-slate-900/95 backdrop-blur border-b border-slate-800 px-4 py-3">
         <div className="max-w-lg mx-auto flex items-center justify-between gap-2">
           <div>
@@ -845,7 +816,6 @@ Acesse direto: ${inviteUrl}`;
           </div>
         </div>
 
-        {/* Barra de Identidade Ativa / Simulador de Visão */}
         <div className="max-w-lg mx-auto mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
             <span className="text-slate-400 shrink-0">Eu sou:</span>
@@ -857,6 +827,7 @@ Acesse direto: ${inviteUrl}`;
                   onClick={() => {
                     setActiveUserId(p.id);
                     setSelectedConsumers([p.id]);
+                    localStorage.setItem('rachafacil_activeUserId', p.id);
                   }}
                   className={`px-2.5 py-1 rounded-full font-semibold flex items-center gap-1 shrink-0 transition-all ${
                     active
@@ -872,7 +843,7 @@ Acesse direto: ${inviteUrl}`;
           </div>
 
           <button
-            onClick={() => setInRoom(false)}
+            onClick={handleExitRoom}
             className="text-slate-400 hover:text-rose-400 shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-800"
             title="Sair ou Trocar de Sala"
           >
@@ -882,7 +853,6 @@ Acesse direto: ${inviteUrl}`;
       </header>
 
       <main className="max-w-lg mx-auto p-4 space-y-5">
-        {/* Seção 1: Galera na Mesa */}
         <section className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
@@ -894,13 +864,15 @@ Acesse direto: ${inviteUrl}`;
             </span>
           </div>
 
-          {/* Carrossel de Avatares */}
           <div className="flex items-center gap-3 overflow-x-auto pb-1">
             {roomData.participants.map((p) => (
               <div key={p.id} className="flex flex-col items-center shrink-0 relative group">
                 <button
                   type="button"
-                  onClick={() => setActiveUserId(p.id)}
+                  onClick={() => {
+                    setActiveUserId(p.id);
+                    localStorage.setItem('rachafacil_activeUserId', p.id);
+                  }}
                   className={`w-12 h-12 rounded-full bg-gradient-to-br ${p.gradient} flex items-center justify-center font-bold text-white shadow-md border-2 transition-transform ${
                     p.id === currentUser?.id ? 'border-emerald-400 scale-105' : 'border-slate-800 opacity-85'
                   }`}
@@ -927,7 +899,6 @@ Acesse direto: ${inviteUrl}`;
             ))}
           </div>
 
-          {/* Adicionar amigo rápido */}
           <form onSubmit={handleAddParticipant} className="flex gap-2 pt-1">
             <input
               type="text"
@@ -945,7 +916,6 @@ Acesse direto: ${inviteUrl}`;
           </form>
         </section>
 
-        {/* Navegação de Abas */}
         <div className="grid grid-cols-3 bg-slate-800 p-1 rounded-2xl border border-slate-700/50 text-xs font-bold">
           <button
             onClick={() => setActiveTab('items')}
@@ -973,10 +943,8 @@ Acesse direto: ${inviteUrl}`;
           </button>
         </div>
 
-        {/* ABA 1: COMANDA E LANÇAMENTO DE ITENS */}
         {activeTab === 'items' && (
           <div className="space-y-5">
-            {/* Card Lançar Item */}
             <form
               onSubmit={handleAddItem}
               className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-3.5"
@@ -988,7 +956,6 @@ Acesse direto: ${inviteUrl}`;
                 <span className="text-[11px] text-slate-400">Lançando como {currentUser?.name}</span>
               </div>
 
-              {/* Atalhos Rápidos */}
               <div className="flex gap-1.5 overflow-x-auto pb-1">
                 {QUICK_PRESETS.map((preset) => (
                   <button
@@ -1039,7 +1006,6 @@ Acesse direto: ${inviteUrl}`;
                 </div>
               </div>
 
-              {/* Quem consumiu */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400">Quem vai dividir esse item?</span>
@@ -1047,594 +1013,3 @@ Acesse direto: ${inviteUrl}`;
                     type="button"
                     onClick={() => setSelectedConsumers(roomData.participants.map((p) => p.id))}
                     className="text-emerald-400 font-semibold hover:underline"
-                  >
-                    Marcar Todos
-                  </button>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {roomData.participants.map((p) => {
-                    const isSel = selectedConsumers.includes(p.id);
-                    return (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedConsumers((prev) =>
-                            prev.includes(p.id) ? prev.filter((id) => id !== p.id) : [...prev, p.id]
-                          );
-                        }}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border ${
-                          isSel
-                            ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                            : 'bg-slate-900 border-slate-700 text-slate-400'
-                        }`}
-                      >
-                        {p.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <button
-                type="submit"
-                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center justify-center gap-2 text-sm"
-              >
-                <Plus className="w-4 h-4" /> Adicionar à Conta da Mesa
-              </button>
-            </form>
-
-            {/* Lista de Itens Lançados */}
-            <div className="space-y-2.5">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 px-1">
-                Itens Lançados na Mesa ({roomData.items.length})
-              </h3>
-
-              {roomData.items.length === 0 ? (
-                <div className="bg-slate-800/60 border border-dashed border-slate-700 rounded-2xl p-8 text-center space-y-2">
-                  <Receipt className="w-8 h-8 text-slate-500 mx-auto" />
-                  <p className="text-sm font-semibold text-slate-300">Nenhum pedido lançado ainda</p>
-                  <p className="text-xs text-slate-500">
-                    Use o formulário acima ou toque em um atalho rápido para lançar o primeiro item da mesa.
-                  </p>
-                </div>
-              ) : (
-                roomData.items.map((item) => {
-                  const itemTotal = Number(item.price) * Number(item.qty);
-                  const splitVal = item.consumers.length > 0 ? itemTotal / item.consumers.length : 0;
-
-                  return (
-                    <div
-                      key={item.id}
-                      className="bg-slate-800 rounded-2xl p-4 border border-slate-700/60 shadow space-y-3"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <span className="font-bold text-slate-100 text-sm">
-                            {item.qty}x {item.name}
-                          </span>
-                          <span className="block text-[11px] text-slate-400">
-                            Lançado por {item.addedBy} • {formatCurrency(splitVal)} para cada ({item.consumers.length}{' '}
-                            {item.consumers.length === 1 ? 'pessoa' : 'pessoas'})
-                          </span>
-                        </div>
-                        <div className="text-right">
-                          <span className="font-extrabold text-emerald-400 tabular-nums text-sm block">
-                            {formatCurrency(itemTotal)}
-                          </span>
-                          {isCurrentUserHost ? (
-                            <button
-                              type="button"
-                              onClick={() => handleHostDeleteItem(item.id)}
-                              className="mt-1 inline-flex items-center gap-1 text-[11px] text-rose-400 hover:text-rose-300 font-semibold bg-rose-500/10 px-2 py-0.5 rounded-lg"
-                            >
-                              <Trash2 className="w-3 h-3" /> Excluir
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => setRequestDeleteModalItem(item)}
-                              className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-400 hover:text-amber-300 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-lg"
-                            >
-                              <AlertTriangle className="w-3 h-3" /> Pedir Exclusão
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Alerta caso um convidado tenha solicitado exclusão */}
-                      {item.deleteRequest && (
-                        <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl p-2.5 flex items-center justify-between gap-2 text-xs">
-                          <div className="text-amber-300">
-                            ⚠️ <strong>{item.deleteRequest.requestedBy}</strong> pediu exclusão:{' '}
-                            <em>"{item.deleteRequest.reason}"</em>
-                          </div>
-                          {isCurrentUserHost && (
-                            <div className="flex gap-1.5 shrink-0">
-                              <button
-                                onClick={() => handleHostDeleteItem(item.id)}
-                                className="bg-rose-500 text-white font-bold px-2.5 py-1 rounded-lg"
-                              >
-                                Apagar
-                              </button>
-                              <button
-                                onClick={() => handleHostDismissRequest(item.id)}
-                                className="bg-slate-700 text-slate-200 px-2.5 py-1 rounded-lg"
-                              >
-                                Manter
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Bolinhas interativas de quem está rachando este item */}
-                      <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-700/50">
-                        <span className="text-[11px] text-slate-400 mr-1">Dividindo:</span>
-                        {roomData.participants.map((p) => {
-                          const consuming = item.consumers.includes(p.id);
-                          return (
-                            <button
-                              key={p.id}
-                              type="button"
-                              onClick={() => handleToggleItemConsumer(item.id, p.id)}
-                              className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${
-                                consuming
-                                  ? 'bg-emerald-500 text-slate-950 shadow'
-                                  : 'bg-slate-900 text-slate-500 border border-slate-700'
-                              }`}
-                            >
-                              {p.name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ABA 2: TAXAS, DESCONTO E CHAVE PIX */}
-        {activeTab === 'pix' && (
-          <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-4">
-            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-              <DollarSign className="w-4 h-4 text-emerald-400" /> Configurações da Conta & Pix do Recebedor
-            </h3>
-
-            {/* Toggle 10% Garçom */}
-            <div className="flex items-center justify-between bg-slate-900 p-3.5 rounded-xl border border-slate-700">
-              <div>
-                <span className="text-sm font-semibold block">Taxa de Serviço do Garçom (10%)</span>
-                <span className="text-xs text-slate-400">Calculada proporcionalmente ao consumo individual</span>
-              </div>
-              <button
-                type="button"
-                onClick={() =>
-                  saveAndBroadcastRoom({ ...roomData, serviceFeeEnabled: !roomData.serviceFeeEnabled })
-                }
-                className={`w-12 h-7 rounded-full transition-all p-1 ${
-                  roomData.serviceFeeEnabled ? 'bg-emerald-500' : 'bg-slate-700'
-                }`}
-              >
-                <div
-                  className={`w-5 h-5 rounded-full bg-white transition-transform ${
-                    roomData.serviceFeeEnabled ? 'translate-x-5' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-
-            {/* Couvert e Desconto */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Couvert por Pessoa (R$)</label>
-                <input
-                  type="number"
-                  step="0.50"
-                  min="0"
-                  value={roomData.couvertPerPerson}
-                  onChange={(e) =>
-                    saveAndBroadcastRoom({ ...roomData, couvertPerPerson: parseFloat(e.target.value) || 0 })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 tabular-nums"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Desconto / Cupom (R$)</label>
-                <input
-                  type="number"
-                  step="1"
-                  min="0"
-                  value={roomData.discountAmount}
-                  onChange={(e) =>
-                    saveAndBroadcastRoom({ ...roomData, discountAmount: parseFloat(e.target.value) || 0 })
-                  }
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 tabular-nums"
-                />
-              </div>
-            </div>
-
-            {/* Dados do Pix (Protegidos para apenas o Anfitrião editar) */}
-            <div className="pt-2 border-t border-slate-700 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                  Dados de Recebimento Pix
-                </span>
-                {!isCurrentUserHost && (
-                  <span className="text-[11px] text-amber-400 flex items-center gap-1">
-                    <Lock className="w-3 h-3" /> Somente o Anfitrião edita
-                  </span>
-                )}
-              </div>
-
-              <div className="grid grid-cols-3 gap-2">
-                <select
-                  disabled={!isCurrentUserHost}
-                  value={roomData.pixKeyType}
-                  onChange={(e) => saveAndBroadcastRoom({ ...roomData, pixKeyType: e.target.value })}
-                  className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2.5 text-xs text-slate-100"
-                >
-                  <option>Celular</option>
-                  <option>CPF/CNPJ</option>
-                  <option>E-mail</option>
-                  <option>Aleatória</option>
-                </select>
-                <input
-                  type="text"
-                  disabled={!isCurrentUserHost}
-                  placeholder="Digite a Chave Pix..."
-                  value={roomData.pixKey}
-                  onChange={(e) => {
-                    const updated = { ...roomData, pixKey: e.target.value };
-                    saveAndBroadcastRoom(updated);
-                    localStorage.setItem(
-                      'rachafacil_saved_pix',
-                      JSON.stringify({
-                        pixKeyType: updated.pixKeyType,
-                        pixKey: updated.pixKey,
-                        pixHolder: updated.pixHolder
-                      })
-                    );
-                  }}
-                  className="col-span-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs text-slate-400 block mb-1">Nome do Titular da Conta</label>
-                <input
-                  type="text"
-                  disabled={!isCurrentUserHost}
-                  placeholder="Nome completo ou apelido"
-                  value={roomData.pixHolder}
-                  onChange={(e) => saveAndBroadcastRoom({ ...roomData, pixHolder: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100"
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ABA 3: SEGURANÇA E LGPD */}
-        {activeTab === 'security' && (
-          <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-4">
-            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-              <Shield className="w-4 h-4 text-emerald-400" /> Controle de Segurança do Anfitrião
-            </h3>
-
-            <div className="flex items-center justify-between bg-slate-900 p-3.5 rounded-xl border border-slate-700">
-              <div>
-                <span className="text-sm font-semibold block">Trancar Mesa (Modo Leitura)</span>
-                <span className="text-xs text-slate-400">
-                  Impede que convidados lancem ou alterem itens durante o pagamento
-                </span>
-              </div>
-              <button
-                type="button"
-                disabled={!isCurrentUserHost}
-                onClick={() => saveAndBroadcastRoom({ ...roomData, isLocked: !roomData.isLocked })}
-                className={`px-3.5 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 ${
-                  roomData.isLocked
-                    ? 'bg-amber-500 text-slate-950'
-                    : 'bg-slate-800 text-slate-200 border border-slate-700'
-                }`}
-              >
-                {roomData.isLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                {roomData.isLocked ? 'Destrancar' : 'Trancar'}
-              </button>
-            </div>
-
-            {isCurrentUserHost && (
-              <button
-                type="button"
-                onClick={() => {
-                  localStorage.removeItem(`rachafacil_room_${roomData.code}`);
-                  setInRoom(false);
-                  showToast('Dados da sala apagados com segurança (LGPD)!');
-                }}
-                className="w-full bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2"
-              >
-                <Trash2 className="w-4 h-4" /> Encerrar e Apagar Dados da Sala (LGPD)
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* ========================================================== */}
-        {/* CONTA INDIVIDUAL & RESUMO TOTAL (CLIQUE PARA VER DETALHES) */}
-        {/* ========================================================== */}
-        <section className="bg-slate-800 rounded-2xl p-4 border border-slate-700/60 shadow-xl space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-extrabold text-white">Conta Individual & Resumo Total</h2>
-              <p className="text-[11px] text-slate-400">
-                Toque em qualquer pessoa para abrir tudo que ela consumiu
-              </p>
-            </div>
-            <span className="text-xs font-bold text-emerald-400 tabular-nums">
-              Total: {formatCurrency(totals.grandTotal)}
-            </span>
-          </div>
-
-          <div className="space-y-2.5">
-            {roomData.participants.map((p) => {
-              const pData = totals.byPerson[p.id];
-              const isExpanded = expandedPersonId === p.id;
-
-              return (
-                <div
-                  key={p.id}
-                  className="bg-slate-900 rounded-2xl border border-slate-700/70 overflow-hidden transition-all"
-                >
-                  {/* Linha Principal Clicável */}
-                  <div
-                    onClick={() => setExpandedPersonId(isExpanded ? null : p.id)}
-                    className="p-3.5 flex items-center justify-between gap-2 cursor-pointer hover:bg-slate-800/60"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <div
-                        className={`w-10 h-10 rounded-full bg-gradient-to-br ${p.gradient} flex items-center justify-center font-bold text-xs text-white shrink-0`}
-                      >
-                        {getInitials(p.name)}
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-sm text-slate-100">{p.name}</span>
-                          {p.isHost && <Crown className="w-3.5 h-3.5 text-amber-400" />}
-                        </div>
-                        <span className="text-[11px] text-slate-400 block">
-                          {pData?.itemsConsumed.length || 0} itens • Toque para ver extrato
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <div className="text-right">
-                        <span className="font-extrabold text-base text-emerald-400 tabular-nums block">
-                          {formatCurrency(pData?.finalTotal || 0)}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          {p.paymentStatus === 'paid_pix' && '✅ Pago no Pix'}
-                          {p.paymentStatus === 'paid_card' && '💳 Pago na Maquininha'}
-                          {p.paymentStatus === 'notified' && '🔔 Pix Enviado'}
-                          {p.paymentStatus === 'pending' && '⏳ Pendente'}
-                        </span>
-                      </div>
-                      {isExpanded ? (
-                        <ChevronUp className="w-4 h-4 text-slate-400" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4 text-slate-400" />
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Área Expandida: Tudo que a pessoa consumiu + Botões de Pagamento */}
-                  {isExpanded && (
-                    <div className="px-4 pb-4 pt-2 border-t border-slate-800 bg-slate-950/50 space-y-3 text-xs">
-                      <div className="space-y-1.5">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">
-                          Itens Consumidos por {p.name}:
-                        </span>
-                        {pData?.itemsConsumed.length === 0 ? (
-                          <p className="text-slate-500 italic">Nenhum item marcado para {p.name}.</p>
-                        ) : (
-                          pData.itemsConsumed.map((cItem) => (
-                            <div key={cItem.id} className="flex justify-between text-slate-300">
-                              <span>
-                                • {cItem.qty}x {cItem.name}{' '}
-                                <span className="text-slate-500">(dividido por {cItem.splitCount})</span>
-                              </span>
-                              <span className="font-semibold tabular-nums">{formatCurrency(cItem.myShare)}</span>
-                            </div>
-                          ))
-                        )}
-                      </div>
-
-                      <div className="pt-2 border-t border-slate-800 space-y-1 text-slate-400">
-                        <div className="flex justify-between">
-                          <span>Subtotal Consumo:</span>
-                          <span className="tabular-nums">{formatCurrency(pData?.consumptionSubtotal)}</span>
-                        </div>
-                        {roomData.serviceFeeEnabled && (
-                          <div className="flex justify-between">
-                            <span>Taxa Garçom (10% proporcional):</span>
-                            <span className="tabular-nums">+ {formatCurrency(pData?.serviceFee)}</span>
-                          </div>
-                        )}
-                        {pData?.couvertFee > 0 && (
-                          <div className="flex justify-between">
-                            <span>Couvert Artístico:</span>
-                            <span className="tabular-nums">+ {formatCurrency(pData?.couvertFee)}</span>
-                          </div>
-                        )}
-                        {pData?.discountShare > 0 && (
-                          <div className="flex justify-between text-emerald-400">
-                            <span>Desconto Proporcional:</span>
-                            <span className="tabular-nums">- {formatCurrency(pData?.discountShare)}</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Ações de Pagamento (Pix, Pago na Maquininha/Bar, Confirmar) */}
-                      <div className="pt-2 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setPixModalPerson(pData)}
-                          className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-1.5"
-                        >
-                          <QrCode className="w-4 h-4" /> Gerar QR Pix
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleSetPaymentStatus(
-                              p.id,
-                              p.paymentStatus === 'paid_card' ? 'pending' : 'paid_card'
-                            )
-                          }
-                          className="flex-1 bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/40 text-violet-300 font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-1.5"
-                        >
-                          <CreditCard className="w-4 h-4" /> Pago na Maquininha
-                        </button>
-                        {isCurrentUserHost && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleSetPaymentStatus(
-                                p.id,
-                                p.paymentStatus === 'paid_pix' ? 'pending' : 'paid_pix'
-                              )
-                            }
-                            className="w-full bg-slate-800 hover:bg-slate-700 text-emerald-400 font-bold py-2 px-3 rounded-xl border border-slate-700"
-                          >
-                            {p.paymentStatus === 'paid_pix' ? 'Desmarcar Pago no Pix' : '✅ Confirmar Pix Recebido'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </section>
-
-        {/* Espaço Reservado para Google AdSense */}
-        {showAdSlots && (
-          <div className="bg-slate-800/40 border border-dashed border-slate-700 rounded-2xl p-4 text-center space-y-1">
-            <div className="flex items-center justify-between text-[10px] text-slate-500">
-              <span>PUBLICIDADE • GOOGLE ADSENSE SLOT</span>
-              <button onClick={() => setShowAdSlots(false)} className="hover:text-slate-300">
-                Ocultar Preview Ad
-              </button>
-            </div>
-            <p className="text-xs text-slate-400">
-              Espaço otimizado para anúncio responsivo (Substitua pela sua tag <code>&lt;ins class="adsbygoogle"&gt;</code>)
-            </p>
-          </div>
-        )}
-      </main>
-
-      {/* Barra Fixa no Rodapé (Thumb Zone) */}
-      <div className="fixed bottom-0 inset-x-0 bg-slate-900/95 backdrop-blur border-t border-slate-800 p-3 z-30">
-        <div className="max-w-lg mx-auto flex gap-2">
-          <button
-            type="button"
-            onClick={handleCopyWhatsAppSummary}
-            className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-3.5 px-4 rounded-xl shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 text-sm active:scale-95 transition-all"
-          >
-            <Share2 className="w-4 h-4" /> Copiar Resumo para WhatsApp
-          </button>
-        </div>
-      </div>
-
-      {/* Modal de Solicitação de Exclusão por Convidado */}
-      {requestDeleteModalItem && (
-        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4">
-            <h3 className="text-base font-bold text-white">
-              Pedir ao Anfitrião para excluir "{requestDeleteModalItem.name}"?
-            </h3>
-            <p className="text-xs text-slate-400">
-              Por segurança, somente quem criou a sala pode apagar itens. Escolha o motivo para avisar o Anfitrião:
-            </p>
-            <div className="space-y-2">
-              {['Pedido não veio / Cancelado', 'Item lançado duplicado', 'Valor digitado errado'].map((reason) => (
-                <button
-                  key={reason}
-                  onClick={() => handleGuestRequestDelete(requestDeleteModalItem.id, reason)}
-                  className="w-full bg-slate-900 hover:bg-slate-700 border border-slate-700 text-left px-4 py-3 rounded-xl text-xs font-semibold text-slate-200"
-                >
-                  • {reason}
-                </button>
-              ))}
-            </div>
-            <button
-              onClick={() => setRequestDeleteModalItem(null)}
-              className="w-full bg-slate-700 text-slate-300 font-bold py-2.5 rounded-xl text-xs"
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Modal QR Code Pix Individual */}
-      {pixModalPerson && (
-        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4 text-center">
-            <h3 className="text-lg font-extrabold text-white">
-              Pix de {pixModalPerson.person.name}
-            </h3>
-            <p className="text-2xl font-black text-emerald-400 tabular-nums">
-              {formatCurrency(pixModalPerson.finalTotal)}
-            </p>
-
-            {roomData.pixKey ? (
-              <>
-                <PixQrCodeSvg
-                  payload={generatePixPayload({
-                    key: roomData.pixKey,
-                    name: roomData.pixHolder,
-                    amount: pixModalPerson.finalTotal
-                  })}
-                />
-                <p className="text-xs text-slate-400">
-                  Recebedor: <strong>{roomData.pixHolder}</strong> ({roomData.pixKey})
-                </p>
-                <button
-                  onClick={() => {
-                    const code = generatePixPayload({
-                      key: roomData.pixKey,
-                      name: roomData.pixHolder,
-                      amount: pixModalPerson.finalTotal
-                    });
-                    navigator.clipboard.writeText(code);
-                    showToast('Código Pix Copia e Cola copiado!');
-                  }}
-                  className="w-full bg-emerald-500 text-slate-950 font-bold py-3 rounded-xl flex items-center justify-center gap-2 text-sm"
-                >
-                  <Copy className="w-4 h-4" /> Copiar Código Pix (Copia e Cola)
-                </button>
-              </>
-            ) : (
-              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-xs text-amber-300">
-                O Anfitrião ainda não cadastrou a Chave Pix na aba <strong>"Taxas & Pix"</strong>.
-              </div>
-            )}
-
-            <button
-              onClick={() => setPixModalPerson(null)}
-              className="w-full bg-slate-700 text-slate-200 font-bold py-2.5 rounded-xl text-xs"
-            >
-              Fechar
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
