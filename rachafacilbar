@@ -1,0 +1,6 @@
+git init
+git add .
+git commit -m "feat: versão inicial do rachafacil"
+git branch -M main
+git remote add origin https://github.com/lsmarchii/rachafacilbar.git
+git push -u origin main
