@@ -195,10 +195,9 @@ export default function App() {
       const cleanParam = salaParam.trim().toUpperCase().replace('#', '');
       setJoinCodeInput(cleanParam);
       setLobbyMode('join');
-      const currentSavedCode = localStorage.getItem('rachafacil_roomCode');
-      if (currentSavedCode !== cleanParam) {
-        setInRoom(false);
-      }
+      // Always honor the invitation, including when this browser already has
+      // a different active room stored locally.
+      setInRoom(false);
     }
   }, []);
 
@@ -615,11 +614,19 @@ export default function App() {
     showToast('Status de pagamento atualizado!');
   };
 
-  const handleCopyInviteLink = () => {
-    const inviteUrl = `${window.location.origin}${window.location.pathname}?sala=${roomData.code}`;
+  const handleCopyInviteLink = async () => {
+    const invite = new URL(window.location.href);
+    invite.search = '';
+    invite.searchParams.set('sala', roomData.code);
+    const inviteUrl = invite.toString();
     const text = `🍻 Entre na nossa mesa no *Racha Fácil Bar*!\nCódigo da Sala: *#${roomData.code}*\nAcesse direto: ${inviteUrl}`;
-    navigator.clipboard.writeText(text);
-    showToast('Link de convite copiado para o WhatsApp!');
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('Link de convite copiado para o WhatsApp!');
+    } catch (err) {
+      console.error('Erro ao copiar convite:', err);
+      showToast(`Não foi possível copiar. Compartilhe o código #${roomData.code}.`);
+    }
   };
 
   const handleCopyWhatsAppSummary = () => {
