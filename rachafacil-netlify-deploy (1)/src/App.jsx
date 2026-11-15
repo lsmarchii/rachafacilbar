@@ -12,6 +12,40 @@ import {
 import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 import { db } from "./firebase";
 
+const ADSENSE_CLIENT = import.meta.env.VITE_ADSENSE_CLIENT || 'ca-pub-9042669568618700';
+const ADSENSE_SLOT = import.meta.env.VITE_ADSENSE_SLOT;
+
+function AdSenseSlot() {
+  useEffect(() => {
+    if (!ADSENSE_CLIENT || !ADSENSE_SLOT) return;
+    try {
+      (window.adsbygoogle = window.adsbygoogle || []).push({});
+    } catch (error) {
+      console.error('Erro ao carregar o anúncio do AdSense:', error);
+    }
+  }, []);
+
+  if (!ADSENSE_CLIENT || !ADSENSE_SLOT) {
+    return (
+      <div className="bg-slate-800/40 border border-dashed border-slate-700 rounded-2xl p-4 text-center">
+        <p className="text-[10px] text-slate-500">ESPAÇO PARA PUBLICIDADE</p>
+        <p className="text-xs text-slate-400 mt-1">O anúncio será exibido após configurar sua conta AdSense.</p>
+      </div>
+    );
+  }
+
+  return (
+    <ins
+      className="adsbygoogle block w-full min-h-[100px] overflow-hidden rounded-2xl"
+      style={{ display: 'block' }}
+      data-ad-client={ADSENSE_CLIENT}
+      data-ad-slot={ADSENSE_SLOT}
+      data-ad-format="auto"
+      data-full-width-responsive="true"
+    />
+  );
+}
+
 // ==========================================
 // GERADOR OFICIAL DE PIX (BR CODE BACEN CRC16)
 // ==========================================
@@ -186,6 +220,23 @@ export default function App() {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3200);
   };
+
+  // Load the AdSense verification/serving script on every app view, including
+  // the lobby where a visitor may not have entered a room yet.
+  useEffect(() => {
+    if (!ADSENSE_CLIENT) return;
+    const existingScript = document.querySelector(
+      `script[data-adsense-client="${ADSENSE_CLIENT}"]`
+    );
+    if (existingScript) return;
+
+    const script = document.createElement('script');
+    script.async = true;
+    script.crossOrigin = 'anonymous';
+    script.dataset.adsenseClient = ADSENSE_CLIENT;
+    script.src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${ADSENSE_CLIENT}`;
+    document.head.appendChild(script);
+  }, []);
 
   // Se a pessoa abrir um link de convite (?sala=XXXX), força ir para a tela de Entrar na Sala
   useEffect(() => {
@@ -1555,19 +1606,7 @@ export default function App() {
           </div>
         </section>
 
-        {showAdSlots && (
-          <div className="bg-slate-800/40 border border-dashed border-slate-700 rounded-2xl p-4 text-center space-y-1">
-            <div className="flex items-center justify-between text-[10px] text-slate-500">
-              <span>PUBLICIDADE • GOOGLE ADSENSE SLOT</span>
-              <button onClick={() => setShowAdSlots(false)} className="hover:text-slate-300">
-                Ocultar Preview Ad
-              </button>
-            </div>
-            <p className="text-xs text-slate-400">
-              Espaço otimizado para anúncio responsivo
-            </p>
-          </div>
-        )}
+        {showAdSlots && <AdSenseSlot />}
       </main>
 
       <div className="fixed bottom-0 inset-x-0 bg-slate-900/95 backdrop-blur border-t border-slate-800 p-3 z-30">
