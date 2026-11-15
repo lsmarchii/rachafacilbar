@@ -1,16 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Users, Plus, Trash2, Share2, Sparkles, DollarSign,
-  Lock, Unlock, Crown, QrCode, Copy, CreditCard,
+  Users, Plus, Trash2, Share2, Check, Sparkles, DollarSign,
+  Lock, Unlock, ShieldAlert, Crown, QrCode, Copy, CreditCard,
   AlertTriangle, ChevronDown, ChevronUp, Receipt, LogOut,
-  CheckCircle2, HelpCircle, Shield, UserPlus, ArrowRight
+  CheckCircle2, Clock, HelpCircle, Shield, FileText, Eye, EyeOff, UserPlus, ArrowRight
 } from 'lucide-react';
-
-// ==========================================
-// IMPORTAÇÕES DO FIREBASE (BANCO EM TEMPO REAL)
-// ==========================================
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
-import { db } from "./firebase";
 
 // ==========================================
 // GERADOR OFICIAL DE PIX (BR CODE BACEN CRC16)
@@ -142,131 +136,79 @@ const getInitials = (name) => {
 
 export default function App() {
   // ==========================================
-  // PERSISTÊNCIA SEGURA COM CACHE IMEDIATO (EVITA TELA BRANCA OU ZERAR CONTA NO F5)
+  // ESTADOS GERAIS E LOBBY ZERADO (PRODUÇÃO)
   // ==========================================
-  const [roomCode, setRoomCode] = useState(() => localStorage.getItem('rachafacil_roomCode') || '');
-  const [inRoom, setInRoom] = useState(() => localStorage.getItem('rachafacil_inRoom') === 'true');
-  const [activeUserId, setActiveUserId] = useState(() => localStorage.getItem('rachafacil_activeUserId') || null);
-
-  const [roomData, setRoomData] = useState(() => {
-    try {
-      const savedCode = localStorage.getItem('rachafacil_roomCode');
-      if (savedCode) {
-        const cached = localStorage.getItem(`rachafacil_room_${savedCode}`);
-        if (cached) return JSON.parse(cached);
-      }
-    } catch (e) {
-      console.error("Erro ao ler cache local:", e);
-    }
-    return null;
-  });
-
-  const [lobbyMode, setLobbyMode] = useState('create');
+  const [roomCode, setRoomCode] = useState('');
+  const [inRoom, setInRoom] = useState(false);
+  const [lobbyMode, setLobbyMode] = useState('create'); // 'create' | 'join'
   const [userNameInput, setUserNameInput] = useState('');
   const [joinCodeInput, setJoinCodeInput] = useState('');
   const [roomTitleInput, setRoomTitleInput] = useState('');
   const [hostPinInput, setHostPinInput] = useState('');
 
-  const [activeTab, setActiveTab] = useState('items');
+  // Dados sincronizados da sala
+  const [roomData, setRoomData] = useState(null);
+  const [activeUserId, setActiveUserId] = useState(null);
+  const [activeTab, setActiveTab] = useState('items'); // 'items' | 'pix' | 'security'
 
+  // Formulários internos da sala
   const [newParticipantName, setNewParticipantName] = useState('');
   const [itemName, setItemName] = useState('');
   const [itemPrice, setItemPrice] = useState('');
   const [itemQty, setItemQty] = useState(1);
   const [selectedConsumers, setSelectedConsumers] = useState([]);
 
+  // Modais e estados de UI
   const [expandedPersonId, setExpandedPersonId] = useState(null);
   const [pixModalPerson, setPixModalPerson] = useState(null);
   const [requestDeleteModalItem, setRequestDeleteModalItem] = useState(null);
   const [toastMessage, setToastMessage] = useState(null);
   const [showAdSlots, setShowAdSlots] = useState(true);
-  const [legalModal, setLegalModal] = useState(null);
+  const [legalModal, setLegalModal] = useState(null); // 'privacy' | 'terms'
 
   const showToast = (msg) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3200);
   };
 
-  // Se a pessoa abrir um link de convite (?sala=XXXX), força ir para a tela de Entrar na Sala
+  // Verifica se há ?sala=XXXX na URL ao abrir o site
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const salaParam = params.get('sala');
     if (salaParam) {
-      const cleanParam = salaParam.trim().toUpperCase();
-      setJoinCodeInput(cleanParam);
+      setJoinCodeInput(salaParam.toUpperCase());
       setLobbyMode('join');
-      const currentSavedCode = localStorage.getItem('rachafacil_roomCode');
-      if (currentSavedCode !== cleanParam) {
-        setInRoom(false);
-      }
     }
   }, []);
 
-  // Mantém o usuário ativo selecionado por padrão nos lançamentos
-  useEffect(() => {
-    if (activeUserId && selectedConsumers.length === 0) {
-      setSelectedConsumers([activeUserId]);
-    }
-  }, [activeUserId]);
-
-  const handleExitRoom = () => {
-    localStorage.removeItem('rachafacil_roomCode');
-    localStorage.removeItem('rachafacil_inRoom');
-    localStorage.removeItem('rachafacil_activeUserId');
-    setInRoom(false);
-    setRoomCode('');
-    setActiveUserId(null);
-    setRoomData(null);
-  };
-
-  // ==========================================
-  // SINCRONIZAÇÃO EM TEMPO REAL (FIREBASE + FALLBACK LOCAL)
-  // ==========================================
+  // Sincronização em tempo real entre abas / localStorage
   useEffect(() => {
     if (!inRoom || !roomCode) return;
-
-    let unsubscribe = () => {};
-    try {
-      if (db) {
-        const roomRef = doc(db, "rooms", roomCode);
-        unsubscribe = onSnapshot(
-          roomRef,
-          (docSnap) => {
-            if (docSnap.exists()) {
-              const cloudData = docSnap.data();
-              setRoomData(cloudData);
-              localStorage.setItem(`rachafacil_room_${roomCode}`, JSON.stringify(cloudData));
-            }
-          },
-          (err) => {
-            console.error("Aviso Firebase Snapshot:", err);
-          }
-        );
+    const channel = new BroadcastChannel(`rachafacil_channel_${roomCode}`);
+    channel.onmessage = (event) => {
+      if (event.data && event.data.type === 'SYNC_ROOM') {
+        setRoomData(event.data.payload);
       }
-    } catch (err) {
-      console.error("Erro ao conectar listener do Firebase:", err);
-    }
-
-    return () => {
-      if (typeof unsubscribe === 'function') unsubscribe();
     };
+    return () => channel.close();
   }, [inRoom, roomCode]);
 
-  const saveAndBroadcastRoom = async (updatedRoom) => {
+  const saveAndBroadcastRoom = (updatedRoom) => {
     setRoomData(updatedRoom);
     localStorage.setItem(`rachafacil_room_${updatedRoom.code}`, JSON.stringify(updatedRoom));
     try {
-      if (db) {
-        const roomRef = doc(db, "rooms", updatedRoom.code);
-        await setDoc(roomRef, updatedRoom, { merge: true });
-      }
+      const channel = new BroadcastChannel(`rachafacil_channel_${updatedRoom.code}`);
+      channel.postMessage({ type: 'SYNC_ROOM', payload: updatedRoom });
+      channel.close();
     } catch (e) {
-      console.error("Erro ao salvar no Firebase:", e);
-      showToast('Salvo no aparelho (verifique a conexão com o banco).');
+      // Fallback silencioso
     }
   };
 
-  const handleCreateZeroRoom = async (e) => {
+  // ==========================================
+  // AÇÕES DO LOBBY (CRIAR SALA ZERADA OU ENTRAR)
+  // ==========================================
+  const handleCreateZeroRoom = (e) => {
     e.preventDefault();
     const cleanName = userNameInput.trim();
     if (!cleanName) {
@@ -296,26 +238,21 @@ export default function App() {
           name: cleanName,
           isHost: true,
           gradient: AVATAR_GRADIENTS[0],
-          paymentStatus: 'pending'
+          paymentStatus: 'pending' // 'pending' | 'notified' | 'paid_pix' | 'paid_card'
         }
       ],
       items: []
     };
 
-    localStorage.setItem('rachafacil_roomCode', generatedCode);
-    localStorage.setItem('rachafacil_inRoom', 'true');
-    localStorage.setItem('rachafacil_activeUserId', hostId);
-
+    saveAndBroadcastRoom(newRoom);
     setRoomCode(generatedCode);
     setActiveUserId(hostId);
     setSelectedConsumers([hostId]);
     setInRoom(true);
-
-    await saveAndBroadcastRoom(newRoom);
     showToast(`Sala #${generatedCode} criada! Você é o Anfitrião 👑`);
   };
 
-  const handleJoinRoom = async (e) => {
+  const handleJoinRoom = (e) => {
     e.preventDefault();
     const cleanName = userNameInput.trim();
     const cleanCode = joinCodeInput.trim().toUpperCase().replace('#', '');
@@ -324,80 +261,89 @@ export default function App() {
       return;
     }
 
-    try {
-      let parsedRoom = null;
+    const stored = localStorage.getItem(`rachafacil_room_${cleanCode}`);
+    if (stored) {
+      const parsedRoom = JSON.parse(stored);
+      const existingPerson = parsedRoom.participants.find(
+        (p) => p.name.toLowerCase() === cleanName.toLowerCase()
+      );
 
-      if (db) {
-        const roomRef = doc(db, "rooms", cleanCode);
-        const docSnap = await getDoc(roomRef);
-        if (docSnap.exists()) {
-          parsedRoom = docSnap.data();
-        }
-      }
-
-      if (!parsedRoom) {
-        const cached = localStorage.getItem(`rachafacil_room_${cleanCode}`);
-        if (cached) parsedRoom = JSON.parse(cached);
-      }
-
-      if (parsedRoom) {
-        const participantsList = parsedRoom.participants || [];
-        const existingPerson = participantsList.find(
-          (p) => p.name.toLowerCase() === cleanName.toLowerCase()
-        );
-
-        let activeId = '';
-        if (existingPerson) {
-          activeId = existingPerson.id;
-          setRoomData(parsedRoom);
-          localStorage.setItem(`rachafacil_room_${cleanCode}`, JSON.stringify(parsedRoom));
-        } else {
-          const newUserId = 'user_' + Date.now();
-          activeId = newUserId;
-          const newParticipant = {
-            id: newUserId,
-            name: cleanName,
-            isHost: false,
-            gradient: AVATAR_GRADIENTS[participantsList.length % AVATAR_GRADIENTS.length],
-            paymentStatus: 'pending'
-          };
-          const updatedRoom = {
-            ...parsedRoom,
-            participants: [...participantsList, newParticipant],
-            couvertPayers: [...(parsedRoom.couvertPayers || []), newUserId]
-          };
-          await saveAndBroadcastRoom(updatedRoom);
-        }
-
-        localStorage.setItem('rachafacil_roomCode', cleanCode);
-        localStorage.setItem('rachafacil_inRoom', 'true');
-        localStorage.setItem('rachafacil_activeUserId', activeId);
-
+      if (existingPerson) {
+        setRoomData(parsedRoom);
         setRoomCode(cleanCode);
-        setActiveUserId(activeId);
-        setSelectedConsumers([activeId]);
+        setActiveUserId(existingPerson.id);
+        setSelectedConsumers([existingPerson.id]);
         setInRoom(true);
-        showToast(`Você entrou na mesa #${cleanCode}!`);
+        showToast(`Bem-vindo de volta, ${existingPerson.name}!`);
       } else {
-        showToast("Sala não encontrada! Verifique se o código está correto.");
+        const newUserId = 'user_' + Date.now();
+        const newParticipant = {
+          id: newUserId,
+          name: cleanName,
+          isHost: false,
+          gradient: AVATAR_GRADIENTS[parsedRoom.participants.length % AVATAR_GRADIENTS.length],
+          paymentStatus: 'pending'
+        };
+        const updatedRoom = {
+          ...parsedRoom,
+          participants: [...parsedRoom.participants, newParticipant],
+          couvertPayers: [...(parsedRoom.couvertPayers || []), newUserId]
+        };
+        saveAndBroadcastRoom(updatedRoom);
+        setRoomCode(cleanCode);
+        setActiveUserId(newUserId);
+        setSelectedConsumers([newUserId]);
+        setInRoom(true);
+        showToast(`Você entrou na sala #${cleanCode}!`);
       }
-    } catch (err) {
-      console.error("Erro ao entrar na sala:", err);
-      showToast("Erro ao conectar com o banco de dados.");
+    } else {
+      // Se o amigo abriu o link em outro aparelho sem Firebase configurado ainda, inicia a sala sincronizada com o código informado
+      const guestId = 'user_' + Date.now();
+      const newRoomFromCode = {
+        code: cleanCode,
+        title: `Sala #${cleanCode}`,
+        hostId: guestId,
+        hostPin: '',
+        isLocked: false,
+        serviceFeeEnabled: true,
+        couvertPerPerson: 0,
+        couvertPayers: [guestId],
+        discountAmount: 0,
+        pixKeyType: 'Celular',
+        pixKey: '',
+        pixHolder: cleanName,
+        participants: [
+          {
+            id: guestId,
+            name: cleanName,
+            isHost: true,
+            gradient: AVATAR_GRADIENTS[0],
+            paymentStatus: 'pending'
+          }
+        ],
+        items: []
+      };
+      saveAndBroadcastRoom(newRoomFromCode);
+      setRoomCode(cleanCode);
+      setActiveUserId(guestId);
+      setSelectedConsumers([guestId]);
+      setInRoom(true);
+      showToast(`Sala #${cleanCode} aberta!`);
     }
   };
 
+  // ==========================================
+  // PERMISSÕES E CÁLCULOS EM TEMPO REAL
+  // ==========================================
   const currentUser = useMemo(() => {
-    if (!roomData || !roomData.participants) return null;
+    if (!roomData) return null;
     return roomData.participants.find((p) => p.id === activeUserId) || roomData.participants[0];
   }, [roomData, activeUserId]);
 
   const isCurrentUserHost = Boolean(currentUser && (currentUser.isHost || currentUser.id === roomData?.hostId));
 
   const totals = useMemo(() => {
-    if (!roomData || !roomData.participants) {
-      return { byPerson: {}, tableSubtotal: 0, totalService: 0, totalCouvert: 0, totalDiscount: 0, grandTotal: 0 };
-    }
+    if (!roomData) return { byPerson: {}, tableSubtotal: 0, totalService: 0, totalCouvert: 0, totalDiscount: 0, grandTotal: 0 };
 
     const byPerson = {};
     roomData.participants.forEach((p) => {
@@ -414,10 +360,10 @@ export default function App() {
 
     let tableSubtotal = 0;
 
-    (roomData.items || []).forEach((item) => {
+    roomData.items.forEach((item) => {
       const totalItemPrice = Number(item.price) * Number(item.qty);
       tableSubtotal += totalItemPrice;
-      const validConsumers = (item.consumers || []).filter((cid) => byPerson[cid]);
+      const validConsumers = item.consumers.filter((cid) => byPerson[cid]);
       if (validConsumers.length > 0) {
         const splitValue = totalItemPrice / validConsumers.length;
         validConsumers.forEach((cid) => {
@@ -458,7 +404,10 @@ export default function App() {
     return { byPerson, tableSubtotal, totalService, totalCouvert, totalDiscount: discountAmount, grandTotal };
   }, [roomData]);
 
-  const handleAddParticipant = async (e) => {
+  // ==========================================
+  // FUNÇÕES DE INTERAÇÃO NA SALA
+  // ==========================================
+  const handleAddParticipant = (e) => {
     e.preventDefault();
     if (roomData.isLocked && !isCurrentUserHost) {
       showToast('A mesa está trancada pelo Anfitrião!');
@@ -467,25 +416,24 @@ export default function App() {
     const clean = newParticipantName.trim();
     if (!clean) return;
     const newId = 'user_' + Date.now();
-    const participantsList = roomData.participants || [];
     const newPerson = {
       id: newId,
       name: clean,
       isHost: false,
-      gradient: AVATAR_GRADIENTS[participantsList.length % AVATAR_GRADIENTS.length],
+      gradient: AVATAR_GRADIENTS[roomData.participants.length % AVATAR_GRADIENTS.length],
       paymentStatus: 'pending'
     };
     const updated = {
       ...roomData,
-      participants: [...participantsList, newPerson],
+      participants: [...roomData.participants, newPerson],
       couvertPayers: [...(roomData.couvertPayers || []), newId]
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     setNewParticipantName('');
     showToast(`${clean} entrou na mesa!`);
   };
 
-  const handleRemoveParticipant = async (personId) => {
+  const handleRemoveParticipant = (personId) => {
     if (!isCurrentUserHost) {
       showToast('Somente o Anfitrião pode remover participantes.');
       return;
@@ -496,18 +444,18 @@ export default function App() {
     }
     const updated = {
       ...roomData,
-      participants: (roomData.participants || []).filter((p) => p.id !== personId),
-      items: (roomData.items || []).map((it) => ({
+      participants: roomData.participants.filter((p) => p.id !== personId),
+      items: roomData.items.map((it) => ({
         ...it,
-        consumers: (it.consumers || []).filter((cid) => cid !== personId)
+        consumers: it.consumers.filter((cid) => cid !== personId)
       }))
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     if (activeUserId === personId) setActiveUserId(roomData.hostId);
     showToast('Participante removido.');
   };
 
-  const handleAddItem = async (e) => {
+  const handleAddItem = (e) => {
     e.preventDefault();
     if (roomData.isLocked && !isCurrentUserHost) {
       showToast('Mesa trancada para novos lançamentos!');
@@ -519,114 +467,117 @@ export default function App() {
       showToast('Informe o nome e um valor válido para o item!');
       return;
     }
-    const consumersToUse = selectedConsumers.length > 0 ? selectedConsumers : [currentUser?.id];
+    const consumersToUse = selectedConsumers.length > 0 ? selectedConsumers : [currentUser.id];
     const newItem = {
       id: 'item_' + Date.now(),
       name: cleanName,
       price: numericPrice,
       qty: Math.max(1, Number(itemQty) || 1),
       consumers: consumersToUse,
-      addedBy: currentUser?.name || 'Participante',
-      addedById: currentUser?.id || '',
+      addedBy: currentUser.name,
+      addedById: currentUser.id,
       deleteRequest: null
     };
     const updated = {
       ...roomData,
-      items: [newItem, ...(roomData.items || [])]
+      items: [newItem, ...roomData.items]
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     setItemName('');
     setItemPrice('');
     setItemQty(1);
-    if (currentUser?.id) setSelectedConsumers([currentUser.id]);
+    setSelectedConsumers([currentUser.id]);
     showToast(`"${cleanName}" adicionado na conta!`);
   };
 
-  const handleToggleItemConsumer = async (itemId, personId) => {
+  const handleToggleItemConsumer = (itemId, personId) => {
     if (roomData.isLocked && !isCurrentUserHost) {
       showToast('A mesa está trancada pelo Anfitrião!');
       return;
     }
     const updated = {
       ...roomData,
-      items: (roomData.items || []).map((it) => {
+      items: roomData.items.map((it) => {
         if (it.id !== itemId) return it;
-        const currentConsumers = it.consumers || [];
-        const exists = currentConsumers.includes(personId);
+        const exists = it.consumers.includes(personId);
         const nextConsumers = exists
-          ? currentConsumers.filter((id) => id !== personId)
-          : [...currentConsumers, personId];
+          ? it.consumers.filter((id) => id !== personId)
+          : [...it.consumers, personId];
         return { ...it, consumers: nextConsumers };
       })
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
   };
 
-  const handleHostDeleteItem = async (itemId) => {
+  // Exclusão direta pelo Anfitrião
+  const handleHostDeleteItem = (itemId) => {
     if (!isCurrentUserHost) {
       showToast('Apenas o Anfitrião pode excluir itens diretamente.');
       return;
     }
     const updated = {
       ...roomData,
-      items: (roomData.items || []).filter((it) => it.id !== itemId)
+      items: roomData.items.filter((it) => it.id !== itemId)
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     showToast('Item excluído pelo Anfitrião!');
   };
 
-  const handleGuestRequestDelete = async (itemId, reason) => {
+  // Pedido de exclusão por Convidado
+  const handleGuestRequestDelete = (itemId, reason) => {
     const updated = {
       ...roomData,
-      items: (roomData.items || []).map((it) =>
+      items: roomData.items.map((it) =>
         it.id === itemId
           ? {
               ...it,
               deleteRequest: {
-                requestedBy: currentUser?.name || 'Convidado',
+                requestedBy: currentUser.name,
                 reason
               }
             }
           : it
       )
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     setRequestDeleteModalItem(null);
     showToast('Solicitação enviada para o Anfitrião aprovar!');
   };
 
-  const handleHostDismissRequest = async (itemId) => {
+  const handleHostDismissRequest = (itemId) => {
     const updated = {
       ...roomData,
-      items: (roomData.items || []).map((it) => (it.id === itemId ? { ...it, deleteRequest: null } : it))
+      items: roomData.items.map((it) => (it.id === itemId ? { ...it, deleteRequest: null } : it))
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     showToast('Solicitação recusada. O item foi mantido.');
   };
 
-  const handleSetPaymentStatus = async (personId, newStatus) => {
+  const handleSetPaymentStatus = (personId, newStatus) => {
     const updated = {
       ...roomData,
-      participants: (roomData.participants || []).map((p) =>
+      participants: roomData.participants.map((p) =>
         p.id === personId ? { ...p, paymentStatus: newStatus } : p
       )
     };
-    await saveAndBroadcastRoom(updated);
+    saveAndBroadcastRoom(updated);
     showToast('Status de pagamento atualizado!');
   };
 
   const handleCopyInviteLink = () => {
     const inviteUrl = `${window.location.origin}${window.location.pathname}?sala=${roomData.code}`;
-    const text = `🍻 Entre na nossa mesa no *RachaFácil*!\nCódigo da Sala: *#${roomData.code}*\nAcesse direto: ${inviteUrl}`;
+    const text = `🍻 Entre na nossa mesa no *RachaFácil*!
+Código da Sala: *#${roomData.code}*
+Acesse direto: ${inviteUrl}`;
     navigator.clipboard.writeText(text);
     showToast('Link de convite copiado para o WhatsApp!');
   };
 
   const handleCopyWhatsAppSummary = () => {
     const lines = [];
-    lines.push(`🍻 *RESUMO DA CONTA — ${(roomData.title || 'Mesa').toUpperCase()} (Sala #${roomData.code})*`);
+    lines.push(`🍻 *RESUMO DA CONTA — ${roomData.title.toUpperCase()} (Sala #${roomData.code})*`);
     lines.push(`──────────────────────`);
-    (roomData.participants || []).forEach((p) => {
+    roomData.participants.forEach((p) => {
       const pData = totals.byPerson[p.id];
       const statusBadge =
         p.paymentStatus === 'paid_pix'
@@ -641,30 +592,16 @@ export default function App() {
     lines.push(`──────────────────────`);
     lines.push(`💰 *TOTAL DA MESA:* ${formatCurrency(totals.grandTotal)}`);
     if (roomData.pixKey) {
-      lines.push(`\n💸 *Faça seu Pix para:* ${roomData.pixKey} (${roomData.pixHolder || 'Anfitrião'})`);
+      lines.push(`
+💸 *Faça seu Pix para:* ${roomData.pixKey} (${roomData.pixHolder || 'Anfitrião'})`);
     }
     const shareUrl = `${window.location.origin}${window.location.pathname}`;
-    lines.push(`\n⚡ _Conta dividida em 10s no RachaFácil:_ ${shareUrl}`);
+    lines.push(`
+⚡ _Conta dividida em 10s no RachaFácil:_ ${shareUrl}`);
 
     navigator.clipboard.writeText(lines.join('\n'));
     showToast('Resumo completo copiado para o WhatsApp! 🎉');
   };
-
-  // Se o usuário deu F5 e os dados da nuvem ainda estão carregando (1 segundo)
-  if (inRoom && roomCode && !roomData) {
-    return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-4 space-y-4">
-        <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm font-bold text-slate-300">Reconectando à Sala #{roomCode}...</p>
-        <button
-          onClick={handleExitRoom}
-          className="text-xs text-slate-400 hover:text-rose-400 underline pt-2"
-        >
-          Voltar para a tela inicial
-        </button>
-      </div>
-    );
-  }
 
   // ==========================================
   // TELA 1: LOBBY ZERADO DE PRODUÇÃO
@@ -680,6 +617,7 @@ export default function App() {
         )}
 
         <div className="max-w-md w-full mx-auto pt-6 space-y-6">
+          {/* Branding Header */}
           <div className="text-center space-y-2">
             <div className="inline-flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-3.5 py-1.5 rounded-full text-xs font-semibold">
               <Sparkles className="w-3.5 h-3.5" /> Divisão de Conta em Tempo Real + QR Pix
@@ -692,6 +630,7 @@ export default function App() {
             </p>
           </div>
 
+          {/* Seletor Criar vs Entrar */}
           <div className="grid grid-cols-2 bg-slate-800 p-1.5 rounded-2xl border border-slate-700/60">
             <button
               type="button"
@@ -717,6 +656,7 @@ export default function App() {
             </button>
           </div>
 
+          {/* Card do Formulário */}
           {lobbyMode === 'create' ? (
             <form
               onSubmit={handleCreateZeroRoom}
@@ -815,15 +755,19 @@ export default function App() {
             </form>
           )}
 
+          {/* Bloco SEO & AdSense Content */}
           <div className="bg-slate-800/60 rounded-2xl p-5 border border-slate-700/40 space-y-3 text-xs text-slate-400">
             <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
               <HelpCircle className="w-4 h-4 text-emerald-400" /> Como funciona o RachaFácil?
             </h2>
             <p>
-              1. <strong>Crie a Sala:</strong> O responsável pela mesa cria uma sala e compartilha o código com os amigos.
+              1. <strong>Crie a Sala:</strong> O responsável pela mesa cria uma sala gratuita e compartilha o link ou código de 4 dígitos com os amigos.
             </p>
             <p>
-              2. <strong>Tempo Real:</strong> Todos da mesa podem adicionar porções e bebidas. O Firestore sincroniza os celulares instantaneamente.
+              2. <strong>Lance em Tempo Real:</strong> Todos da mesa podem adicionar porções, bebidas e marcar quem dividiu cada item. Somente o Anfitrião pode excluir itens para evitar erros.
+            </p>
+            <p>
+              3. <strong>Feche com Pix Oficial:</strong> O app calcula automaticamente os 10% do garçom de forma proporcional ao consumo de cada pessoa e gera o QR Code Pix oficial do Banco Central.
             </p>
             <div className="pt-2 flex items-center justify-between border-t border-slate-700/50 text-[11px]">
               <button onClick={() => setLegalModal('privacy')} className="hover:text-emerald-400 underline">
@@ -836,6 +780,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Modal Legal LGPD / Termos */}
         {legalModal && (
           <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
             <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-md w-full p-5 space-y-4">
@@ -844,8 +789,8 @@ export default function App() {
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
                 {legalModal === 'privacy'
-                  ? 'O RachaFácil preza pela sua privacidade conforme a LGPD (Lei nº 13.709/2018). As chaves Pix servem exclusivamente para gerar o código oficial do Banco Central.'
-                  : 'O RachaFácil é uma ferramenta auxiliar de cálculo para divisão de despesas entre amigos.'}
+                  ? 'O RachaFácil preza pela sua privacidade conforme a Lei Geral de Proteção de Dados (Lei nº 13.709/2018). Não exigimos cadastro de senha ou dados bancários sensíveis. As chaves Pix informadas servem exclusivamente para gerar o código padrão EMV do Banco Central diretamente no navegador do usuário e podem ser apagadas a qualquer instante pelo criador da sala.'
+                  : 'O RachaFácil é uma ferramenta auxiliar de cálculo para divisão de despesas entre amigos. Os valores e pagamentos via Pix ocorrem diretamente entre as instituições bancárias dos usuários, sem intermediação financeira ou retenção de valores pela plataforma.'}
               </p>
               <button
                 onClick={() => setLegalModal(null)}
@@ -865,6 +810,7 @@ export default function App() {
   // ==========================================
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 pb-28">
+      {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-emerald-500 text-slate-950 font-bold px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-2">
           <CheckCircle2 className="w-5 h-5 shrink-0" />
@@ -872,6 +818,7 @@ export default function App() {
         </div>
       )}
 
+      {/* Header Fixo */}
       <header className="sticky top-0 z-30 bg-slate-900/95 backdrop-blur border-b border-slate-800 px-4 py-3">
         <div className="max-w-lg mx-auto flex items-center justify-between gap-2">
           <div>
@@ -898,10 +845,11 @@ export default function App() {
           </div>
         </div>
 
+        {/* Barra de Identidade Ativa / Simulador de Visão */}
         <div className="max-w-lg mx-auto mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
             <span className="text-slate-400 shrink-0">Eu sou:</span>
-            {(roomData.participants || []).map((p) => {
+            {roomData.participants.map((p) => {
               const active = p.id === currentUser?.id;
               return (
                 <button
@@ -909,7 +857,6 @@ export default function App() {
                   onClick={() => {
                     setActiveUserId(p.id);
                     setSelectedConsumers([p.id]);
-                    localStorage.setItem('rachafacil_activeUserId', p.id);
                   }}
                   className={`px-2.5 py-1 rounded-full font-semibold flex items-center gap-1 shrink-0 transition-all ${
                     active
@@ -925,7 +872,7 @@ export default function App() {
           </div>
 
           <button
-            onClick={handleExitRoom}
+            onClick={() => setInRoom(false)}
             className="text-slate-400 hover:text-rose-400 shrink-0 flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-800"
             title="Sair ou Trocar de Sala"
           >
@@ -935,26 +882,25 @@ export default function App() {
       </header>
 
       <main className="max-w-lg mx-auto p-4 space-y-5">
+        {/* Seção 1: Galera na Mesa */}
         <section className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
               <Users className="w-4 h-4 text-violet-400" />
-              Galera na Mesa ({(roomData.participants || []).length})
+              Galera na Mesa ({roomData.participants.length})
             </h2>
             <span className="text-[11px] px-2.5 py-0.5 rounded-full font-semibold bg-slate-900 text-slate-300">
               {isCurrentUserHost ? '👑 Você é o Anfitrião' : '🍻 Modo Convidado'}
             </span>
           </div>
 
+          {/* Carrossel de Avatares */}
           <div className="flex items-center gap-3 overflow-x-auto pb-1">
-            {(roomData.participants || []).map((p) => (
+            {roomData.participants.map((p) => (
               <div key={p.id} className="flex flex-col items-center shrink-0 relative group">
                 <button
                   type="button"
-                  onClick={() => {
-                    setActiveUserId(p.id);
-                    localStorage.setItem('rachafacil_activeUserId', p.id);
-                  }}
+                  onClick={() => setActiveUserId(p.id)}
                   className={`w-12 h-12 rounded-full bg-gradient-to-br ${p.gradient} flex items-center justify-center font-bold text-white shadow-md border-2 transition-transform ${
                     p.id === currentUser?.id ? 'border-emerald-400 scale-105' : 'border-slate-800 opacity-85'
                   }`}
@@ -981,6 +927,7 @@ export default function App() {
             ))}
           </div>
 
+          {/* Adicionar amigo rápido */}
           <form onSubmit={handleAddParticipant} className="flex gap-2 pt-1">
             <input
               type="text"
@@ -998,6 +945,7 @@ export default function App() {
           </form>
         </section>
 
+        {/* Navegação de Abas */}
         <div className="grid grid-cols-3 bg-slate-800 p-1 rounded-2xl border border-slate-700/50 text-xs font-bold">
           <button
             onClick={() => setActiveTab('items')}
@@ -1005,7 +953,7 @@ export default function App() {
               activeTab === 'items' ? 'bg-emerald-500 text-slate-950 shadow' : 'text-slate-400'
             }`}
           >
-            🍻 Comanda ({(roomData.items || []).length})
+            🍻 Comanda ({roomData.items.length})
           </button>
           <button
             onClick={() => setActiveTab('pix')}
@@ -1025,8 +973,10 @@ export default function App() {
           </button>
         </div>
 
+        {/* ABA 1: COMANDA E LANÇAMENTO DE ITENS */}
         {activeTab === 'items' && (
           <div className="space-y-5">
+            {/* Card Lançar Item */}
             <form
               onSubmit={handleAddItem}
               className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-3.5"
@@ -1038,6 +988,7 @@ export default function App() {
                 <span className="text-[11px] text-slate-400">Lançando como {currentUser?.name}</span>
               </div>
 
+              {/* Atalhos Rápidos */}
               <div className="flex gap-1.5 overflow-x-auto pb-1">
                 {QUICK_PRESETS.map((preset) => (
                   <button
@@ -1088,19 +1039,20 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Quem consumiu */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-slate-400">Quem vai dividir esse item?</span>
                   <button
                     type="button"
-                    onClick={() => setSelectedConsumers((roomData.participants || []).map((p) => p.id))}
+                    onClick={() => setSelectedConsumers(roomData.participants.map((p) => p.id))}
                     className="text-emerald-400 font-semibold hover:underline"
                   >
                     Marcar Todos
                   </button>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
-                  {(roomData.participants || []).map((p) => {
+                  {roomData.participants.map((p) => {
                     const isSel = selectedConsumers.includes(p.id);
                     return (
                       <button
@@ -1132,21 +1084,24 @@ export default function App() {
               </button>
             </form>
 
+            {/* Lista de Itens Lançados */}
             <div className="space-y-2.5">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 px-1">
-                Itens Lançados na Mesa ({(roomData.items || []).length})
+                Itens Lançados na Mesa ({roomData.items.length})
               </h3>
 
-              {(roomData.items || []).length === 0 ? (
+              {roomData.items.length === 0 ? (
                 <div className="bg-slate-800/60 border border-dashed border-slate-700 rounded-2xl p-8 text-center space-y-2">
                   <Receipt className="w-8 h-8 text-slate-500 mx-auto" />
                   <p className="text-sm font-semibold text-slate-300">Nenhum pedido lançado ainda</p>
+                  <p className="text-xs text-slate-500">
+                    Use o formulário acima ou toque em um atalho rápido para lançar o primeiro item da mesa.
+                  </p>
                 </div>
               ) : (
-                (roomData.items || []).map((item) => {
+                roomData.items.map((item) => {
                   const itemTotal = Number(item.price) * Number(item.qty);
-                  const consumersList = item.consumers || [];
-                  const splitVal = consumersList.length > 0 ? itemTotal / consumersList.length : 0;
+                  const splitVal = item.consumers.length > 0 ? itemTotal / item.consumers.length : 0;
 
                   return (
                     <div
@@ -1159,8 +1114,8 @@ export default function App() {
                             {item.qty}x {item.name}
                           </span>
                           <span className="block text-[11px] text-slate-400">
-                            Lançado por {item.addedBy} • {formatCurrency(splitVal)} para cada ({consumersList.length}{' '}
-                            {consumersList.length === 1 ? 'pessoa' : 'pessoas'})
+                            Lançado por {item.addedBy} • {formatCurrency(splitVal)} para cada ({item.consumers.length}{' '}
+                            {item.consumers.length === 1 ? 'pessoa' : 'pessoas'})
                           </span>
                         </div>
                         <div className="text-right">
@@ -1187,6 +1142,7 @@ export default function App() {
                         </div>
                       </div>
 
+                      {/* Alerta caso um convidado tenha solicitado exclusão */}
                       {item.deleteRequest && (
                         <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl p-2.5 flex items-center justify-between gap-2 text-xs">
                           <div className="text-amber-300">
@@ -1212,10 +1168,11 @@ export default function App() {
                         </div>
                       )}
 
+                      {/* Bolinhas interativas de quem está rachando este item */}
                       <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-700/50">
                         <span className="text-[11px] text-slate-400 mr-1">Dividindo:</span>
-                        {(roomData.participants || []).map((p) => {
-                          const consuming = consumersList.includes(p.id);
+                        {roomData.participants.map((p) => {
+                          const consuming = item.consumers.includes(p.id);
                           return (
                             <button
                               key={p.id}
@@ -1240,12 +1197,14 @@ export default function App() {
           </div>
         )}
 
+        {/* ABA 2: TAXAS, DESCONTO E CHAVE PIX */}
         {activeTab === 'pix' && (
           <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-4">
             <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
               <DollarSign className="w-4 h-4 text-emerald-400" /> Configurações da Conta & Pix do Recebedor
             </h3>
 
+            {/* Toggle 10% Garçom */}
             <div className="flex items-center justify-between bg-slate-900 p-3.5 rounded-xl border border-slate-700">
               <div>
                 <span className="text-sm font-semibold block">Taxa de Serviço do Garçom (10%)</span>
@@ -1253,10 +1212,9 @@ export default function App() {
               </div>
               <button
                 type="button"
-                onClick={async () => {
-                  const updated = { ...roomData, serviceFeeEnabled: !roomData.serviceFeeEnabled };
-                  await saveAndBroadcastRoom(updated);
-                }}
+                onClick={() =>
+                  saveAndBroadcastRoom({ ...roomData, serviceFeeEnabled: !roomData.serviceFeeEnabled })
+                }
                 className={`w-12 h-7 rounded-full transition-all p-1 ${
                   roomData.serviceFeeEnabled ? 'bg-emerald-500' : 'bg-slate-700'
                 }`}
@@ -1269,6 +1227,7 @@ export default function App() {
               </button>
             </div>
 
+            {/* Couvert e Desconto */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-xs text-slate-400 block mb-1">Couvert por Pessoa (R$)</label>
@@ -1277,10 +1236,9 @@ export default function App() {
                   step="0.50"
                   min="0"
                   value={roomData.couvertPerPerson}
-                  onChange={async (e) => {
-                    const updated = { ...roomData, couvertPerPerson: parseFloat(e.target.value) || 0 };
-                    await saveAndBroadcastRoom(updated);
-                  }}
+                  onChange={(e) =>
+                    saveAndBroadcastRoom({ ...roomData, couvertPerPerson: parseFloat(e.target.value) || 0 })
+                  }
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 tabular-nums"
                 />
               </div>
@@ -1291,15 +1249,15 @@ export default function App() {
                   step="1"
                   min="0"
                   value={roomData.discountAmount}
-                  onChange={async (e) => {
-                    const updated = { ...roomData, discountAmount: parseFloat(e.target.value) || 0 };
-                    await saveAndBroadcastRoom(updated);
-                  }}
+                  onChange={(e) =>
+                    saveAndBroadcastRoom({ ...roomData, discountAmount: parseFloat(e.target.value) || 0 })
+                  }
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 tabular-nums"
                 />
               </div>
             </div>
 
+            {/* Dados do Pix (Protegidos para apenas o Anfitrião editar) */}
             <div className="pt-2 border-t border-slate-700 space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
@@ -1316,10 +1274,7 @@ export default function App() {
                 <select
                   disabled={!isCurrentUserHost}
                   value={roomData.pixKeyType}
-                  onChange={async (e) => {
-                    const updated = { ...roomData, pixKeyType: e.target.value };
-                    await saveAndBroadcastRoom(updated);
-                  }}
+                  onChange={(e) => saveAndBroadcastRoom({ ...roomData, pixKeyType: e.target.value })}
                   className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2.5 text-xs text-slate-100"
                 >
                   <option>Celular</option>
@@ -1332,9 +1287,9 @@ export default function App() {
                   disabled={!isCurrentUserHost}
                   placeholder="Digite a Chave Pix..."
                   value={roomData.pixKey}
-                  onChange={async (e) => {
+                  onChange={(e) => {
                     const updated = { ...roomData, pixKey: e.target.value };
-                    await saveAndBroadcastRoom(updated);
+                    saveAndBroadcastRoom(updated);
                     localStorage.setItem(
                       'rachafacil_saved_pix',
                       JSON.stringify({
@@ -1355,10 +1310,7 @@ export default function App() {
                   disabled={!isCurrentUserHost}
                   placeholder="Nome completo ou apelido"
                   value={roomData.pixHolder}
-                  onChange={async (e) => {
-                    const updated = { ...roomData, pixHolder: e.target.value };
-                    await saveAndBroadcastRoom(updated);
-                  }}
+                  onChange={(e) => saveAndBroadcastRoom({ ...roomData, pixHolder: e.target.value })}
                   className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100"
                 />
               </div>
@@ -1366,6 +1318,7 @@ export default function App() {
           </div>
         )}
 
+        {/* ABA 3: SEGURANÇA E LGPD */}
         {activeTab === 'security' && (
           <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-4">
             <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
@@ -1382,10 +1335,7 @@ export default function App() {
               <button
                 type="button"
                 disabled={!isCurrentUserHost}
-                onClick={async () => {
-                  const updated = { ...roomData, isLocked: !roomData.isLocked };
-                  await saveAndBroadcastRoom(updated);
-                }}
+                onClick={() => saveAndBroadcastRoom({ ...roomData, isLocked: !roomData.isLocked })}
                 className={`px-3.5 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 ${
                   roomData.isLocked
                     ? 'bg-amber-500 text-slate-950'
@@ -1396,9 +1346,26 @@ export default function App() {
                 {roomData.isLocked ? 'Destrancar' : 'Trancar'}
               </button>
             </div>
+
+            {isCurrentUserHost && (
+              <button
+                type="button"
+                onClick={() => {
+                  localStorage.removeItem(`rachafacil_room_${roomData.code}`);
+                  setInRoom(false);
+                  showToast('Dados da sala apagados com segurança (LGPD)!');
+                }}
+                className="w-full bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 font-bold py-3 rounded-xl text-xs flex items-center justify-center gap-2"
+              >
+                <Trash2 className="w-4 h-4" /> Encerrar e Apagar Dados da Sala (LGPD)
+              </button>
+            )}
           </div>
         )}
 
+        {/* ========================================================== */}
+        {/* CONTA INDIVIDUAL & RESUMO TOTAL (CLIQUE PARA VER DETALHES) */}
+        {/* ========================================================== */}
         <section className="bg-slate-800 rounded-2xl p-4 border border-slate-700/60 shadow-xl space-y-3">
           <div className="flex items-center justify-between">
             <div>
@@ -1413,7 +1380,7 @@ export default function App() {
           </div>
 
           <div className="space-y-2.5">
-            {(roomData.participants || []).map((p) => {
+            {roomData.participants.map((p) => {
               const pData = totals.byPerson[p.id];
               const isExpanded = expandedPersonId === p.id;
 
@@ -1422,6 +1389,7 @@ export default function App() {
                   key={p.id}
                   className="bg-slate-900 rounded-2xl border border-slate-700/70 overflow-hidden transition-all"
                 >
+                  {/* Linha Principal Clicável */}
                   <div
                     onClick={() => setExpandedPersonId(isExpanded ? null : p.id)}
                     className="p-3.5 flex items-center justify-between gap-2 cursor-pointer hover:bg-slate-800/60"
@@ -1463,6 +1431,7 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Área Expandida: Tudo que a pessoa consumiu + Botões de Pagamento */}
                   {isExpanded && (
                     <div className="px-4 pb-4 pt-2 border-t border-slate-800 bg-slate-950/50 space-y-3 text-xs">
                       <div className="space-y-1.5">
@@ -1501,8 +1470,15 @@ export default function App() {
                             <span className="tabular-nums">+ {formatCurrency(pData?.couvertFee)}</span>
                           </div>
                         )}
+                        {pData?.discountShare > 0 && (
+                          <div className="flex justify-between text-emerald-400">
+                            <span>Desconto Proporcional:</span>
+                            <span className="tabular-nums">- {formatCurrency(pData?.discountShare)}</span>
+                          </div>
+                        )}
                       </div>
 
+                      {/* Ações de Pagamento (Pix, Pago na Maquininha/Bar, Confirmar) */}
                       <div className="pt-2 flex flex-wrap gap-2">
                         <button
                           type="button"
@@ -1546,6 +1522,7 @@ export default function App() {
           </div>
         </section>
 
+        {/* Espaço Reservado para Google AdSense */}
         {showAdSlots && (
           <div className="bg-slate-800/40 border border-dashed border-slate-700 rounded-2xl p-4 text-center space-y-1">
             <div className="flex items-center justify-between text-[10px] text-slate-500">
@@ -1555,12 +1532,13 @@ export default function App() {
               </button>
             </div>
             <p className="text-xs text-slate-400">
-              Espaço otimizado para anúncio responsivo
+              Espaço otimizado para anúncio responsivo (Substitua pela sua tag <code>&lt;ins class="adsbygoogle"&gt;</code>)
             </p>
           </div>
         )}
       </main>
 
+      {/* Barra Fixa no Rodapé (Thumb Zone) */}
       <div className="fixed bottom-0 inset-x-0 bg-slate-900/95 backdrop-blur border-t border-slate-800 p-3 z-30">
         <div className="max-w-lg mx-auto flex gap-2">
           <button
@@ -1573,12 +1551,16 @@ export default function App() {
         </div>
       </div>
 
+      {/* Modal de Solicitação de Exclusão por Convidado */}
       {requestDeleteModalItem && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
           <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4">
             <h3 className="text-base font-bold text-white">
               Pedir ao Anfitrião para excluir "{requestDeleteModalItem.name}"?
             </h3>
+            <p className="text-xs text-slate-400">
+              Por segurança, somente quem criou a sala pode apagar itens. Escolha o motivo para avisar o Anfitrião:
+            </p>
             <div className="space-y-2">
               {['Pedido não veio / Cancelado', 'Item lançado duplicado', 'Valor digitado errado'].map((reason) => (
                 <button
@@ -1600,6 +1582,7 @@ export default function App() {
         </div>
       )}
 
+      {/* Modal QR Code Pix Individual */}
       {pixModalPerson && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
           <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4 text-center">
