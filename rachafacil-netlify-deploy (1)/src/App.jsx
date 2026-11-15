@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Users, Plus, Trash2, Share2, Check, Sparkles, DollarSign,
-  Lock, Unlock, ShieldAlert, Crown, QrCode, Copy, CreditCard,
+  Users, Plus, Trash2, Share2, Sparkles, DollarSign,
+  Lock, Unlock, Crown, QrCode, Copy, CreditCard,
   AlertTriangle, ChevronDown, ChevronUp, Receipt, LogOut,
-  CheckCircle2, Clock, HelpCircle, Shield, FileText, Eye, EyeOff, UserPlus, ArrowRight
+  CheckCircle2, HelpCircle, Shield, UserPlus, ArrowRight
 } from 'lucide-react';
 
 // ==========================================
@@ -141,10 +141,25 @@ const getInitials = (name) => {
 };
 
 export default function App() {
-  // PERSISTÊNCIA: Recupera da memória do navegador ao atualizar (F5)
+  // ==========================================
+  // PERSISTÊNCIA SEGURA COM CACHE IMEDIATO (EVITA TELA BRANCA OU ZERAR CONTA NO F5)
+  // ==========================================
   const [roomCode, setRoomCode] = useState(() => localStorage.getItem('rachafacil_roomCode') || '');
   const [inRoom, setInRoom] = useState(() => localStorage.getItem('rachafacil_inRoom') === 'true');
   const [activeUserId, setActiveUserId] = useState(() => localStorage.getItem('rachafacil_activeUserId') || null);
+
+  const [roomData, setRoomData] = useState(() => {
+    try {
+      const savedCode = localStorage.getItem('rachafacil_roomCode');
+      if (savedCode) {
+        const cached = localStorage.getItem(`rachafacil_room_${savedCode}`);
+        if (cached) return JSON.parse(cached);
+      }
+    } catch (e) {
+      console.error("Erro ao ler cache local:", e);
+    }
+    return null;
+  });
 
   const [lobbyMode, setLobbyMode] = useState('create');
   const [userNameInput, setUserNameInput] = useState('');
@@ -152,7 +167,6 @@ export default function App() {
   const [roomTitleInput, setRoomTitleInput] = useState('');
   const [hostPinInput, setHostPinInput] = useState('');
 
-  const [roomData, setRoomData] = useState(null);
   const [activeTab, setActiveTab] = useState('items');
 
   const [newParticipantName, setNewParticipantName] = useState('');
@@ -173,43 +187,27 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3200);
   };
 
+  // Se a pessoa abrir um link de convite (?sala=XXXX), força ir para a tela de Entrar na Sala
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const salaParam = params.get('sala');
     if (salaParam) {
-      setJoinCodeInput(salaParam.toUpperCase());
+      const cleanParam = salaParam.trim().toUpperCase();
+      setJoinCodeInput(cleanParam);
       setLobbyMode('join');
+      const currentSavedCode = localStorage.getItem('rachafacil_roomCode');
+      if (currentSavedCode !== cleanParam) {
+        setInRoom(false);
+      }
     }
   }, []);
 
-  // SINCRONIZAÇÃO EM TEMPO REAL COM O FIREBASE
+  // Mantém o usuário ativo selecionado por padrão nos lançamentos
   useEffect(() => {
-    if (!inRoom || !roomCode) return;
-    
-    const roomRef = doc(db, "rooms", roomCode);
-    const unsubscribe = onSnapshot(roomRef, (docSnap) => {
-      if (docSnap.exists()) {
-        setRoomData(docSnap.data());
-      } else {
-        // Se a sala foi apagada na nuvem
-        handleExitRoom();
-        showToast("Esta sala foi encerrada pelo anfitrião.");
-      }
-    });
-
-    return () => unsubscribe();
-  }, [inRoom, roomCode]);
-
-  const saveAndBroadcastRoom = async (updatedRoom) => {
-    setRoomData(updatedRoom);
-    try {
-      const roomRef = doc(db, "rooms", updatedRoom.code);
-      await setDoc(roomRef, updatedRoom, { merge: true });
-    } catch (e) {
-      console.error("Erro ao salvar no Firebase:", e);
-      showToast('Erro de sincronização com o banco de dados.');
+    if (activeUserId && selectedConsumers.length === 0) {
+      setSelectedConsumers([activeUserId]);
     }
-  };
+  }, [activeUserId]);
 
   const handleExitRoom = () => {
     localStorage.removeItem('rachafacil_roomCode');
@@ -219,6 +217,53 @@ export default function App() {
     setRoomCode('');
     setActiveUserId(null);
     setRoomData(null);
+  };
+
+  // ==========================================
+  // SINCRONIZAÇÃO EM TEMPO REAL (FIREBASE + FALLBACK LOCAL)
+  // ==========================================
+  useEffect(() => {
+    if (!inRoom || !roomCode) return;
+
+    let unsubscribe = () => {};
+    try {
+      if (db) {
+        const roomRef = doc(db, "rooms", roomCode);
+        unsubscribe = onSnapshot(
+          roomRef,
+          (docSnap) => {
+            if (docSnap.exists()) {
+              const cloudData = docSnap.data();
+              setRoomData(cloudData);
+              localStorage.setItem(`rachafacil_room_${roomCode}`, JSON.stringify(cloudData));
+            }
+          },
+          (err) => {
+            console.error("Aviso Firebase Snapshot:", err);
+          }
+        );
+      }
+    } catch (err) {
+      console.error("Erro ao conectar listener do Firebase:", err);
+    }
+
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [inRoom, roomCode]);
+
+  const saveAndBroadcastRoom = async (updatedRoom) => {
+    setRoomData(updatedRoom);
+    localStorage.setItem(`rachafacil_room_${updatedRoom.code}`, JSON.stringify(updatedRoom));
+    try {
+      if (db) {
+        const roomRef = doc(db, "rooms", updatedRoom.code);
+        await setDoc(roomRef, updatedRoom, { merge: true });
+      }
+    } catch (e) {
+      console.error("Erro ao salvar no Firebase:", e);
+      showToast('Salvo no aparelho (verifique a conexão com o banco).');
+    }
   };
 
   const handleCreateZeroRoom = async (e) => {
@@ -257,9 +302,6 @@ export default function App() {
       items: []
     };
 
-    await saveAndBroadcastRoom(newRoom);
-    
-    // Salva na persistência local
     localStorage.setItem('rachafacil_roomCode', generatedCode);
     localStorage.setItem('rachafacil_inRoom', 'true');
     localStorage.setItem('rachafacil_activeUserId', hostId);
@@ -268,6 +310,8 @@ export default function App() {
     setActiveUserId(hostId);
     setSelectedConsumers([hostId]);
     setInRoom(true);
+
+    await saveAndBroadcastRoom(newRoom);
     showToast(`Sala #${generatedCode} criada! Você é o Anfitrião 👑`);
   };
 
@@ -281,12 +325,24 @@ export default function App() {
     }
 
     try {
-      const roomRef = doc(db, "rooms", cleanCode);
-      const docSnap = await getDoc(roomRef);
+      let parsedRoom = null;
 
-      if (docSnap.exists()) {
-        const parsedRoom = docSnap.data();
-        const existingPerson = parsedRoom.participants.find(
+      if (db) {
+        const roomRef = doc(db, "rooms", cleanCode);
+        const docSnap = await getDoc(roomRef);
+        if (docSnap.exists()) {
+          parsedRoom = docSnap.data();
+        }
+      }
+
+      if (!parsedRoom) {
+        const cached = localStorage.getItem(`rachafacil_room_${cleanCode}`);
+        if (cached) parsedRoom = JSON.parse(cached);
+      }
+
+      if (parsedRoom) {
+        const participantsList = parsedRoom.participants || [];
+        const existingPerson = participantsList.find(
           (p) => p.name.toLowerCase() === cleanName.toLowerCase()
         );
 
@@ -294,6 +350,7 @@ export default function App() {
         if (existingPerson) {
           activeId = existingPerson.id;
           setRoomData(parsedRoom);
+          localStorage.setItem(`rachafacil_room_${cleanCode}`, JSON.stringify(parsedRoom));
         } else {
           const newUserId = 'user_' + Date.now();
           activeId = newUserId;
@@ -301,12 +358,12 @@ export default function App() {
             id: newUserId,
             name: cleanName,
             isHost: false,
-            gradient: AVATAR_GRADIENTS[parsedRoom.participants.length % AVATAR_GRADIENTS.length],
+            gradient: AVATAR_GRADIENTS[participantsList.length % AVATAR_GRADIENTS.length],
             paymentStatus: 'pending'
           };
           const updatedRoom = {
             ...parsedRoom,
-            participants: [...parsedRoom.participants, newParticipant],
+            participants: [...participantsList, newParticipant],
             couvertPayers: [...(parsedRoom.couvertPayers || []), newUserId]
           };
           await saveAndBroadcastRoom(updatedRoom);
@@ -320,9 +377,8 @@ export default function App() {
         setActiveUserId(activeId);
         setSelectedConsumers([activeId]);
         setInRoom(true);
-        showToast(`Bem-vindo à mesa #${cleanCode}!`);
+        showToast(`Você entrou na mesa #${cleanCode}!`);
       } else {
-        // Sala não existe na nuvem - BLOQUEIA criação fantasma
         showToast("Sala não encontrada! Verifique se o código está correto.");
       }
     } catch (err) {
@@ -332,14 +388,16 @@ export default function App() {
   };
 
   const currentUser = useMemo(() => {
-    if (!roomData) return null;
+    if (!roomData || !roomData.participants) return null;
     return roomData.participants.find((p) => p.id === activeUserId) || roomData.participants[0];
   }, [roomData, activeUserId]);
 
   const isCurrentUserHost = Boolean(currentUser && (currentUser.isHost || currentUser.id === roomData?.hostId));
 
   const totals = useMemo(() => {
-    if (!roomData) return { byPerson: {}, tableSubtotal: 0, totalService: 0, totalCouvert: 0, totalDiscount: 0, grandTotal: 0 };
+    if (!roomData || !roomData.participants) {
+      return { byPerson: {}, tableSubtotal: 0, totalService: 0, totalCouvert: 0, totalDiscount: 0, grandTotal: 0 };
+    }
 
     const byPerson = {};
     roomData.participants.forEach((p) => {
@@ -356,10 +414,10 @@ export default function App() {
 
     let tableSubtotal = 0;
 
-    roomData.items.forEach((item) => {
+    (roomData.items || []).forEach((item) => {
       const totalItemPrice = Number(item.price) * Number(item.qty);
       tableSubtotal += totalItemPrice;
-      const validConsumers = item.consumers.filter((cid) => byPerson[cid]);
+      const validConsumers = (item.consumers || []).filter((cid) => byPerson[cid]);
       if (validConsumers.length > 0) {
         const splitValue = totalItemPrice / validConsumers.length;
         validConsumers.forEach((cid) => {
@@ -409,16 +467,17 @@ export default function App() {
     const clean = newParticipantName.trim();
     if (!clean) return;
     const newId = 'user_' + Date.now();
+    const participantsList = roomData.participants || [];
     const newPerson = {
       id: newId,
       name: clean,
       isHost: false,
-      gradient: AVATAR_GRADIENTS[roomData.participants.length % AVATAR_GRADIENTS.length],
+      gradient: AVATAR_GRADIENTS[participantsList.length % AVATAR_GRADIENTS.length],
       paymentStatus: 'pending'
     };
     const updated = {
       ...roomData,
-      participants: [...roomData.participants, newPerson],
+      participants: [...participantsList, newPerson],
       couvertPayers: [...(roomData.couvertPayers || []), newId]
     };
     await saveAndBroadcastRoom(updated);
@@ -437,10 +496,10 @@ export default function App() {
     }
     const updated = {
       ...roomData,
-      participants: roomData.participants.filter((p) => p.id !== personId),
-      items: roomData.items.map((it) => ({
+      participants: (roomData.participants || []).filter((p) => p.id !== personId),
+      items: (roomData.items || []).map((it) => ({
         ...it,
-        consumers: it.consumers.filter((cid) => cid !== personId)
+        consumers: (it.consumers || []).filter((cid) => cid !== personId)
       }))
     };
     await saveAndBroadcastRoom(updated);
@@ -460,26 +519,26 @@ export default function App() {
       showToast('Informe o nome e um valor válido para o item!');
       return;
     }
-    const consumersToUse = selectedConsumers.length > 0 ? selectedConsumers : [currentUser.id];
+    const consumersToUse = selectedConsumers.length > 0 ? selectedConsumers : [currentUser?.id];
     const newItem = {
       id: 'item_' + Date.now(),
       name: cleanName,
       price: numericPrice,
       qty: Math.max(1, Number(itemQty) || 1),
       consumers: consumersToUse,
-      addedBy: currentUser.name,
-      addedById: currentUser.id,
+      addedBy: currentUser?.name || 'Participante',
+      addedById: currentUser?.id || '',
       deleteRequest: null
     };
     const updated = {
       ...roomData,
-      items: [newItem, ...roomData.items]
+      items: [newItem, ...(roomData.items || [])]
     };
     await saveAndBroadcastRoom(updated);
     setItemName('');
     setItemPrice('');
     setItemQty(1);
-    setSelectedConsumers([currentUser.id]);
+    if (currentUser?.id) setSelectedConsumers([currentUser.id]);
     showToast(`"${cleanName}" adicionado na conta!`);
   };
 
@@ -490,12 +549,13 @@ export default function App() {
     }
     const updated = {
       ...roomData,
-      items: roomData.items.map((it) => {
+      items: (roomData.items || []).map((it) => {
         if (it.id !== itemId) return it;
-        const exists = it.consumers.includes(personId);
+        const currentConsumers = it.consumers || [];
+        const exists = currentConsumers.includes(personId);
         const nextConsumers = exists
-          ? it.consumers.filter((id) => id !== personId)
-          : [...it.consumers, personId];
+          ? currentConsumers.filter((id) => id !== personId)
+          : [...currentConsumers, personId];
         return { ...it, consumers: nextConsumers };
       })
     };
@@ -509,7 +569,7 @@ export default function App() {
     }
     const updated = {
       ...roomData,
-      items: roomData.items.filter((it) => it.id !== itemId)
+      items: (roomData.items || []).filter((it) => it.id !== itemId)
     };
     await saveAndBroadcastRoom(updated);
     showToast('Item excluído pelo Anfitrião!');
@@ -518,12 +578,12 @@ export default function App() {
   const handleGuestRequestDelete = async (itemId, reason) => {
     const updated = {
       ...roomData,
-      items: roomData.items.map((it) =>
+      items: (roomData.items || []).map((it) =>
         it.id === itemId
           ? {
               ...it,
               deleteRequest: {
-                requestedBy: currentUser.name,
+                requestedBy: currentUser?.name || 'Convidado',
                 reason
               }
             }
@@ -538,7 +598,7 @@ export default function App() {
   const handleHostDismissRequest = async (itemId) => {
     const updated = {
       ...roomData,
-      items: roomData.items.map((it) => (it.id === itemId ? { ...it, deleteRequest: null } : it))
+      items: (roomData.items || []).map((it) => (it.id === itemId ? { ...it, deleteRequest: null } : it))
     };
     await saveAndBroadcastRoom(updated);
     showToast('Solicitação recusada. O item foi mantido.');
@@ -547,7 +607,7 @@ export default function App() {
   const handleSetPaymentStatus = async (personId, newStatus) => {
     const updated = {
       ...roomData,
-      participants: roomData.participants.map((p) =>
+      participants: (roomData.participants || []).map((p) =>
         p.id === personId ? { ...p, paymentStatus: newStatus } : p
       )
     };
@@ -564,9 +624,9 @@ export default function App() {
 
   const handleCopyWhatsAppSummary = () => {
     const lines = [];
-    lines.push(`🍻 *RESUMO DA CONTA — ${roomData.title.toUpperCase()} (Sala #${roomData.code})*`);
+    lines.push(`🍻 *RESUMO DA CONTA — ${(roomData.title || 'Mesa').toUpperCase()} (Sala #${roomData.code})*`);
     lines.push(`──────────────────────`);
-    roomData.participants.forEach((p) => {
+    (roomData.participants || []).forEach((p) => {
       const pData = totals.byPerson[p.id];
       const statusBadge =
         p.paymentStatus === 'paid_pix'
@@ -590,6 +650,25 @@ export default function App() {
     showToast('Resumo completo copiado para o WhatsApp! 🎉');
   };
 
+  // Se o usuário deu F5 e os dados da nuvem ainda estão carregando (1 segundo)
+  if (inRoom && roomCode && !roomData) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-4 space-y-4">
+        <div className="w-10 h-10 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm font-bold text-slate-300">Reconectando à Sala #{roomCode}...</p>
+        <button
+          onClick={handleExitRoom}
+          className="text-xs text-slate-400 hover:text-rose-400 underline pt-2"
+        >
+          Voltar para a tela inicial
+        </button>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // TELA 1: LOBBY ZERADO DE PRODUÇÃO
+  // ==========================================
   if (!inRoom || !roomData) {
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col justify-between p-4 pb-10">
@@ -765,7 +844,7 @@ export default function App() {
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
                 {legalModal === 'privacy'
-                  ? 'O RachaFácil preza pela sua privacidade conforme a LGPD. As chaves Pix servem exclusivamente para gerar o Pix oficial.'
+                  ? 'O RachaFácil preza pela sua privacidade conforme a LGPD (Lei nº 13.709/2018). As chaves Pix servem exclusivamente para gerar o código oficial do Banco Central.'
                   : 'O RachaFácil é uma ferramenta auxiliar de cálculo para divisão de despesas entre amigos.'}
               </p>
               <button
@@ -781,6 +860,9 @@ export default function App() {
     );
   }
 
+  // ==========================================
+  // TELA 2: DENTRO DA SALA ATIVA
+  // ==========================================
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 pb-28">
       {toastMessage && (
@@ -819,7 +901,7 @@ export default function App() {
         <div className="max-w-lg mx-auto mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
             <span className="text-slate-400 shrink-0">Eu sou:</span>
-            {roomData.participants.map((p) => {
+            {(roomData.participants || []).map((p) => {
               const active = p.id === currentUser?.id;
               return (
                 <button
@@ -857,7 +939,7 @@ export default function App() {
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-200 flex items-center gap-2">
               <Users className="w-4 h-4 text-violet-400" />
-              Galera na Mesa ({roomData.participants.length})
+              Galera na Mesa ({(roomData.participants || []).length})
             </h2>
             <span className="text-[11px] px-2.5 py-0.5 rounded-full font-semibold bg-slate-900 text-slate-300">
               {isCurrentUserHost ? '👑 Você é o Anfitrião' : '🍻 Modo Convidado'}
@@ -865,7 +947,7 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3 overflow-x-auto pb-1">
-            {roomData.participants.map((p) => (
+            {(roomData.participants || []).map((p) => (
               <div key={p.id} className="flex flex-col items-center shrink-0 relative group">
                 <button
                   type="button"
@@ -923,7 +1005,7 @@ export default function App() {
               activeTab === 'items' ? 'bg-emerald-500 text-slate-950 shadow' : 'text-slate-400'
             }`}
           >
-            🍻 Comanda ({roomData.items.length})
+            🍻 Comanda ({(roomData.items || []).length})
           </button>
           <button
             onClick={() => setActiveTab('pix')}
@@ -1011,5 +1093,565 @@ export default function App() {
                   <span className="text-slate-400">Quem vai dividir esse item?</span>
                   <button
                     type="button"
-                    onClick={() => setSelectedConsumers(roomData.participants.map((p) => p.id))}
+                    onClick={() => setSelectedConsumers((roomData.participants || []).map((p) => p.id))}
                     className="text-emerald-400 font-semibold hover:underline"
+                  >
+                    Marcar Todos
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(roomData.participants || []).map((p) => {
+                    const isSel = selectedConsumers.includes(p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedConsumers((prev) =>
+                            prev.includes(p.id) ? prev.filter((id) => id !== p.id) : [...prev, p.id]
+                          );
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all border ${
+                          isSel
+                            ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+                            : 'bg-slate-900 border-slate-700 text-slate-400'
+                        }`}
+                      >
+                        {p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl shadow-lg shadow-emerald-500/20 transition-all active:scale-95 flex items-center justify-center gap-2 text-sm"
+              >
+                <Plus className="w-4 h-4" /> Adicionar à Conta da Mesa
+              </button>
+            </form>
+
+            <div className="space-y-2.5">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 px-1">
+                Itens Lançados na Mesa ({(roomData.items || []).length})
+              </h3>
+
+              {(roomData.items || []).length === 0 ? (
+                <div className="bg-slate-800/60 border border-dashed border-slate-700 rounded-2xl p-8 text-center space-y-2">
+                  <Receipt className="w-8 h-8 text-slate-500 mx-auto" />
+                  <p className="text-sm font-semibold text-slate-300">Nenhum pedido lançado ainda</p>
+                </div>
+              ) : (
+                (roomData.items || []).map((item) => {
+                  const itemTotal = Number(item.price) * Number(item.qty);
+                  const consumersList = item.consumers || [];
+                  const splitVal = consumersList.length > 0 ? itemTotal / consumersList.length : 0;
+
+                  return (
+                    <div
+                      key={item.id}
+                      className="bg-slate-800 rounded-2xl p-4 border border-slate-700/60 shadow space-y-3"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="font-bold text-slate-100 text-sm">
+                            {item.qty}x {item.name}
+                          </span>
+                          <span className="block text-[11px] text-slate-400">
+                            Lançado por {item.addedBy} • {formatCurrency(splitVal)} para cada ({consumersList.length}{' '}
+                            {consumersList.length === 1 ? 'pessoa' : 'pessoas'})
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="font-extrabold text-emerald-400 tabular-nums text-sm block">
+                            {formatCurrency(itemTotal)}
+                          </span>
+                          {isCurrentUserHost ? (
+                            <button
+                              type="button"
+                              onClick={() => handleHostDeleteItem(item.id)}
+                              className="mt-1 inline-flex items-center gap-1 text-[11px] text-rose-400 hover:text-rose-300 font-semibold bg-rose-500/10 px-2 py-0.5 rounded-lg"
+                            >
+                              <Trash2 className="w-3 h-3" /> Excluir
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setRequestDeleteModalItem(item)}
+                              className="mt-1 inline-flex items-center gap-1 text-[11px] text-amber-400 hover:text-amber-300 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-lg"
+                            >
+                              <AlertTriangle className="w-3 h-3" /> Pedir Exclusão
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {item.deleteRequest && (
+                        <div className="bg-amber-500/10 border border-amber-500/40 rounded-xl p-2.5 flex items-center justify-between gap-2 text-xs">
+                          <div className="text-amber-300">
+                            ⚠️ <strong>{item.deleteRequest.requestedBy}</strong> pediu exclusão:{' '}
+                            <em>"{item.deleteRequest.reason}"</em>
+                          </div>
+                          {isCurrentUserHost && (
+                            <div className="flex gap-1.5 shrink-0">
+                              <button
+                                onClick={() => handleHostDeleteItem(item.id)}
+                                className="bg-rose-500 text-white font-bold px-2.5 py-1 rounded-lg"
+                              >
+                                Apagar
+                              </button>
+                              <button
+                                onClick={() => handleHostDismissRequest(item.id)}
+                                className="bg-slate-700 text-slate-200 px-2.5 py-1 rounded-lg"
+                              >
+                                Manter
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-700/50">
+                        <span className="text-[11px] text-slate-400 mr-1">Dividindo:</span>
+                        {(roomData.participants || []).map((p) => {
+                          const consuming = consumersList.includes(p.id);
+                          return (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => handleToggleItemConsumer(item.id, p.id)}
+                              className={`px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${
+                                consuming
+                                  ? 'bg-emerald-500 text-slate-950 shadow'
+                                  : 'bg-slate-900 text-slate-500 border border-slate-700'
+                              }`}
+                            >
+                              {p.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'pix' && (
+          <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-4">
+            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+              <DollarSign className="w-4 h-4 text-emerald-400" /> Configurações da Conta & Pix do Recebedor
+            </h3>
+
+            <div className="flex items-center justify-between bg-slate-900 p-3.5 rounded-xl border border-slate-700">
+              <div>
+                <span className="text-sm font-semibold block">Taxa de Serviço do Garçom (10%)</span>
+                <span className="text-xs text-slate-400">Calculada proporcionalmente ao consumo individual</span>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const updated = { ...roomData, serviceFeeEnabled: !roomData.serviceFeeEnabled };
+                  await saveAndBroadcastRoom(updated);
+                }}
+                className={`w-12 h-7 rounded-full transition-all p-1 ${
+                  roomData.serviceFeeEnabled ? 'bg-emerald-500' : 'bg-slate-700'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    roomData.serviceFeeEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Couvert por Pessoa (R$)</label>
+                <input
+                  type="number"
+                  step="0.50"
+                  min="0"
+                  value={roomData.couvertPerPerson}
+                  onChange={async (e) => {
+                    const updated = { ...roomData, couvertPerPerson: parseFloat(e.target.value) || 0 };
+                    await saveAndBroadcastRoom(updated);
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 tabular-nums"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Desconto / Cupom (R$)</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  value={roomData.discountAmount}
+                  onChange={async (e) => {
+                    const updated = { ...roomData, discountAmount: parseFloat(e.target.value) || 0 };
+                    await saveAndBroadcastRoom(updated);
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100 tabular-nums"
+                />
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-700 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                  Dados de Recebimento Pix
+                </span>
+                {!isCurrentUserHost && (
+                  <span className="text-[11px] text-amber-400 flex items-center gap-1">
+                    <Lock className="w-3 h-3" /> Somente o Anfitrião edita
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <select
+                  disabled={!isCurrentUserHost}
+                  value={roomData.pixKeyType}
+                  onChange={async (e) => {
+                    const updated = { ...roomData, pixKeyType: e.target.value };
+                    await saveAndBroadcastRoom(updated);
+                  }}
+                  className="bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2.5 text-xs text-slate-100"
+                >
+                  <option>Celular</option>
+                  <option>CPF/CNPJ</option>
+                  <option>E-mail</option>
+                  <option>Aleatória</option>
+                </select>
+                <input
+                  type="text"
+                  disabled={!isCurrentUserHost}
+                  placeholder="Digite a Chave Pix..."
+                  value={roomData.pixKey}
+                  onChange={async (e) => {
+                    const updated = { ...roomData, pixKey: e.target.value };
+                    await saveAndBroadcastRoom(updated);
+                    localStorage.setItem(
+                      'rachafacil_saved_pix',
+                      JSON.stringify({
+                        pixKeyType: updated.pixKeyType,
+                        pixKey: updated.pixKey,
+                        pixHolder: updated.pixHolder
+                      })
+                    );
+                  }}
+                  className="col-span-2 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">Nome do Titular da Conta</label>
+                <input
+                  type="text"
+                  disabled={!isCurrentUserHost}
+                  placeholder="Nome completo ou apelido"
+                  value={roomData.pixHolder}
+                  onChange={async (e) => {
+                    const updated = { ...roomData, pixHolder: e.target.value };
+                    await saveAndBroadcastRoom(updated);
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-slate-100"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'security' && (
+          <div className="bg-slate-800 rounded-2xl p-4 border border-slate-700/50 shadow-lg space-y-4">
+            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+              <Shield className="w-4 h-4 text-emerald-400" /> Controle de Segurança do Anfitrião
+            </h3>
+
+            <div className="flex items-center justify-between bg-slate-900 p-3.5 rounded-xl border border-slate-700">
+              <div>
+                <span className="text-sm font-semibold block">Trancar Mesa (Modo Leitura)</span>
+                <span className="text-xs text-slate-400">
+                  Impede que convidados lancem ou alterem itens durante o pagamento
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={!isCurrentUserHost}
+                onClick={async () => {
+                  const updated = { ...roomData, isLocked: !roomData.isLocked };
+                  await saveAndBroadcastRoom(updated);
+                }}
+                className={`px-3.5 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 ${
+                  roomData.isLocked
+                    ? 'bg-amber-500 text-slate-950'
+                    : 'bg-slate-800 text-slate-200 border border-slate-700'
+                }`}
+              >
+                {roomData.isLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                {roomData.isLocked ? 'Destrancar' : 'Trancar'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <section className="bg-slate-800 rounded-2xl p-4 border border-slate-700/60 shadow-xl space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-extrabold text-white">Conta Individual & Resumo Total</h2>
+              <p className="text-[11px] text-slate-400">
+                Toque em qualquer pessoa para abrir tudo que ela consumiu
+              </p>
+            </div>
+            <span className="text-xs font-bold text-emerald-400 tabular-nums">
+              Total: {formatCurrency(totals.grandTotal)}
+            </span>
+          </div>
+
+          <div className="space-y-2.5">
+            {(roomData.participants || []).map((p) => {
+              const pData = totals.byPerson[p.id];
+              const isExpanded = expandedPersonId === p.id;
+
+              return (
+                <div
+                  key={p.id}
+                  className="bg-slate-900 rounded-2xl border border-slate-700/70 overflow-hidden transition-all"
+                >
+                  <div
+                    onClick={() => setExpandedPersonId(isExpanded ? null : p.id)}
+                    className="p-3.5 flex items-center justify-between gap-2 cursor-pointer hover:bg-slate-800/60"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={`w-10 h-10 rounded-full bg-gradient-to-br ${p.gradient} flex items-center justify-center font-bold text-xs text-white shrink-0`}
+                      >
+                        {getInitials(p.name)}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-bold text-sm text-slate-100">{p.name}</span>
+                          {p.isHost && <Crown className="w-3.5 h-3.5 text-amber-400" />}
+                        </div>
+                        <span className="text-[11px] text-slate-400 block">
+                          {pData?.itemsConsumed.length || 0} itens • Toque para ver extrato
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <div className="text-right">
+                        <span className="font-extrabold text-base text-emerald-400 tabular-nums block">
+                          {formatCurrency(pData?.finalTotal || 0)}
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          {p.paymentStatus === 'paid_pix' && '✅ Pago no Pix'}
+                          {p.paymentStatus === 'paid_card' && '💳 Pago na Maquininha'}
+                          {p.paymentStatus === 'notified' && '🔔 Pix Enviado'}
+                          {p.paymentStatus === 'pending' && '⏳ Pendente'}
+                        </span>
+                      </div>
+                      {isExpanded ? (
+                        <ChevronUp className="w-4 h-4 text-slate-400" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-slate-400" />
+                      )}
+                    </div>
+                  </div>
+
+                  {isExpanded && (
+                    <div className="px-4 pb-4 pt-2 border-t border-slate-800 bg-slate-950/50 space-y-3 text-xs">
+                      <div className="space-y-1.5">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">
+                          Itens Consumidos por {p.name}:
+                        </span>
+                        {pData?.itemsConsumed.length === 0 ? (
+                          <p className="text-slate-500 italic">Nenhum item marcado para {p.name}.</p>
+                        ) : (
+                          pData.itemsConsumed.map((cItem) => (
+                            <div key={cItem.id} className="flex justify-between text-slate-300">
+                              <span>
+                                • {cItem.qty}x {cItem.name}{' '}
+                                <span className="text-slate-500">(dividido por {cItem.splitCount})</span>
+                              </span>
+                              <span className="font-semibold tabular-nums">{formatCurrency(cItem.myShare)}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800 space-y-1 text-slate-400">
+                        <div className="flex justify-between">
+                          <span>Subtotal Consumo:</span>
+                          <span className="tabular-nums">{formatCurrency(pData?.consumptionSubtotal)}</span>
+                        </div>
+                        {roomData.serviceFeeEnabled && (
+                          <div className="flex justify-between">
+                            <span>Taxa Garçom (10% proporcional):</span>
+                            <span className="tabular-nums">+ {formatCurrency(pData?.serviceFee)}</span>
+                          </div>
+                        )}
+                        {pData?.couvertFee > 0 && (
+                          <div className="flex justify-between">
+                            <span>Couvert Artístico:</span>
+                            <span className="tabular-nums">+ {formatCurrency(pData?.couvertFee)}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="pt-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPixModalPerson(pData)}
+                          className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-1.5"
+                        >
+                          <QrCode className="w-4 h-4" /> Gerar QR Pix
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleSetPaymentStatus(
+                              p.id,
+                              p.paymentStatus === 'paid_card' ? 'pending' : 'paid_card'
+                            )
+                          }
+                          className="flex-1 bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/40 text-violet-300 font-bold py-2 px-3 rounded-xl flex items-center justify-center gap-1.5"
+                        >
+                          <CreditCard className="w-4 h-4" /> Pago na Maquininha
+                        </button>
+                        {isCurrentUserHost && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleSetPaymentStatus(
+                                p.id,
+                                p.paymentStatus === 'paid_pix' ? 'pending' : 'paid_pix'
+                              )
+                            }
+                            className="w-full bg-slate-800 hover:bg-slate-700 text-emerald-400 font-bold py-2 px-3 rounded-xl border border-slate-700"
+                          >
+                            {p.paymentStatus === 'paid_pix' ? 'Desmarcar Pago no Pix' : '✅ Confirmar Pix Recebido'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {showAdSlots && (
+          <div className="bg-slate-800/40 border border-dashed border-slate-700 rounded-2xl p-4 text-center space-y-1">
+            <div className="flex items-center justify-between text-[10px] text-slate-500">
+              <span>PUBLICIDADE • GOOGLE ADSENSE SLOT</span>
+              <button onClick={() => setShowAdSlots(false)} className="hover:text-slate-300">
+                Ocultar Preview Ad
+              </button>
+            </div>
+            <p className="text-xs text-slate-400">
+              Espaço otimizado para anúncio responsivo
+            </p>
+          </div>
+        )}
+      </main>
+
+      <div className="fixed bottom-0 inset-x-0 bg-slate-900/95 backdrop-blur border-t border-slate-800 p-3 z-30">
+        <div className="max-w-lg mx-auto flex gap-2">
+          <button
+            type="button"
+            onClick={handleCopyWhatsAppSummary}
+            className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold py-3.5 px-4 rounded-xl shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 text-sm active:scale-95 transition-all"
+          >
+            <Share2 className="w-4 h-4" /> Copiar Resumo para WhatsApp
+          </button>
+        </div>
+      </div>
+
+      {requestDeleteModalItem && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4">
+            <h3 className="text-base font-bold text-white">
+              Pedir ao Anfitrião para excluir "{requestDeleteModalItem.name}"?
+            </h3>
+            <div className="space-y-2">
+              {['Pedido não veio / Cancelado', 'Item lançado duplicado', 'Valor digitado errado'].map((reason) => (
+                <button
+                  key={reason}
+                  onClick={() => handleGuestRequestDelete(requestDeleteModalItem.id, reason)}
+                  className="w-full bg-slate-900 hover:bg-slate-700 border border-slate-700 text-left px-4 py-3 rounded-xl text-xs font-semibold text-slate-200"
+                >
+                  • {reason}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setRequestDeleteModalItem(null)}
+              className="w-full bg-slate-700 text-slate-300 font-bold py-2.5 rounded-xl text-xs"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {pixModalPerson && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl max-w-sm w-full p-5 space-y-4 text-center">
+            <h3 className="text-lg font-extrabold text-white">
+              Pix de {pixModalPerson.person.name}
+            </h3>
+            <p className="text-2xl font-black text-emerald-400 tabular-nums">
+              {formatCurrency(pixModalPerson.finalTotal)}
+            </p>
+
+            {roomData.pixKey ? (
+              <>
+                <PixQrCodeSvg
+                  payload={generatePixPayload({
+                    key: roomData.pixKey,
+                    name: roomData.pixHolder,
+                    amount: pixModalPerson.finalTotal
+                  })}
+                />
+                <p className="text-xs text-slate-400">
+                  Recebedor: <strong>{roomData.pixHolder}</strong> ({roomData.pixKey})
+                </p>
+                <button
+                  onClick={() => {
+                    const code = generatePixPayload({
+                      key: roomData.pixKey,
+                      name: roomData.pixHolder,
+                      amount: pixModalPerson.finalTotal
+                    });
+                    navigator.clipboard.writeText(code);
+                    showToast('Código Pix Copia e Cola copiado!');
+                  }}
+                  className="w-full bg-emerald-500 text-slate-950 font-bold py-3 rounded-xl flex items-center justify-center gap-2 text-sm"
+                >
+                  <Copy className="w-4 h-4" /> Copiar Código Pix (Copia e Cola)
+                </button>
+              </>
+            ) : (
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-xs text-amber-300">
+                O Anfitrião ainda não cadastrou a Chave Pix na aba <strong>"Taxas & Pix"</strong>.
+              </div>
+            )}
+
+            <button
+              onClick={() => setPixModalPerson(null)}
+              className="w-full bg-slate-700 text-slate-200 font-bold py-2.5 rounded-xl text-xs"
+            >
+              Fechar
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
